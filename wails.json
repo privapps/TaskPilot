@@ -1,0 +1,23 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "taskpilot",
+  "outputfilename": "taskpilot",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "TaskPilot Team",
+    "email": "info@taskpilot.dev"
+  },
+  "info": {
+    "productName": "TaskPilot",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright © 2026",
+    "comments": "A lightweight job scheduler for desktop"
+  },
+  "hooks": {
+    "pre:build": "go test ./...",
+    "pre:dev": "go test ./..."
+  }
+}

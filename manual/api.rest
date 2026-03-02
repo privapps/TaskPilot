@@ -1,0 +1,46 @@
+###
+@baseUrl = http://localhost:41327
+
+### Get all jobs
+GET {{baseUrl}}/api/jobs
+
+### add a new job
+# @name addJob
+POST {{baseUrl}}/api/jobs
+Content-Type: application/json
+
+{
+    "name": "api ai 2",
+    "command": "date",
+    "directory": "/tmp/",
+    "schedule_type": "cron",
+    "schedule": "* * * * *",
+    "sound_file": "/System/Library/PrivateFrameworks/ToneLibrary.framework/Versions/A/Resources/AlertTones/Classic/Chime.m4r",
+    "on_success_cmd": "",
+    "last_result": "",
+    "status": "",
+    "paused": false
+}
+
+#### update a job
+PUT {{baseUrl}}/api/jobs/{{addJob.response.body.id}}
+Content-Type: application/json
+
+{
+    "name": "api ai test 2",
+    "command": "date",
+    "directory": "/tmp/",
+    "schedule_type": "immediate",
+    "schedule": "immediate",
+    "sound_file": "/System/Library/PrivateFrameworks/ToneLibrary.framework/Versions/A/Resources/AlertTones/Classic/Sherwood Forest.m4r",
+    "on_success_cmd": "",
+    "last_result": "",
+    "status": "",
+    "paused": false
+}
+
+### trigger a job
+POST {{baseUrl}}/api/jobs/{{addJob.response.body.id}}/trigger
+
+### system time
+GET {{baseUrl}}/api/system/time

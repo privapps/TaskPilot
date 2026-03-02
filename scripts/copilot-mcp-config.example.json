@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "taskpilot": {
+      "type": "stdio",
+      "command": "$HOME/workplace/pp/ai/TaskPilot/mcp-local/mcp-local",
+      "args": ["--url", "http://localhost:41327"]
+    }
+  }
+}
