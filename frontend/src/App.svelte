@@ -23,7 +23,8 @@
     on_success_cmd: '',
     schedule_type: 'cron',
     delay_minutes: null,
-    run_at: null
+    run_at: null,
+    disable_macos_sleep_prevention: false
   };
   let loading = false;
   let error = '';
@@ -250,6 +251,7 @@
         schedule_type: scheduleType,
         delay_minutes: null,
         run_at: null,
+        disable_macos_sleep_prevention: newJob.disable_macos_sleep_prevention,
         paused: false  // When editing, unpause the job (especially important for one-time jobs)
       };
       
@@ -294,7 +296,8 @@
         on_success_cmd: '',
         schedule_type: 'cron',
         delay_minutes: null,
-        run_at: null
+        run_at: null,
+        disable_macos_sleep_prevention: false
       };
       scheduleType = 'cron';
       editingJob = null;
@@ -388,7 +391,8 @@
       on_success_cmd: job.on_success_cmd || '',
       schedule_type: job.schedule_type || 'cron',
       delay_minutes: job.delay_minutes || null,
-      run_at: job.run_at ? new Date(job.run_at * 1000).toISOString().slice(0, 16) : null
+      run_at: job.run_at ? new Date(job.run_at * 1000).toISOString().slice(0, 16) : null,
+      disable_macos_sleep_prevention: job.disable_macos_sleep_prevention || false
     };
     
     showModal = true;
@@ -561,7 +565,8 @@
       on_success_cmd: '',
       schedule_type: 'cron',
       delay_minutes: null,
-      run_at: null
+      run_at: null,
+      disable_macos_sleep_prevention: false
     };
     showModal = true;
     error = '';
@@ -891,6 +896,19 @@
               class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
               placeholder="echo 'Job completed!'"
             />
+          </div>
+
+          <div class="flex items-center gap-3">
+            <input
+              id="disable_macos_sleep_prevention"
+              type="checkbox"
+              bind:checked={newJob.disable_macos_sleep_prevention}
+              class="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500"
+            />
+            <label for="disable_macos_sleep_prevention" class="text-sm font-medium">
+              Disable macOS sleep prevention
+              <span class="text-gray-400 font-normal">(skip caffeinate wrap and pmset wake events)</span>
+            </label>
           </div>
 
           <div class="flex gap-3 pt-4">

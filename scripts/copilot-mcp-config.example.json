@@ -1,3 +1,4 @@
+// Deprecated: This manual configuration is retained for legacy environments. Use the mcp-local Go binary and see up-to-date docs.
 {
   "mcpServers": {
     "taskpilot": {

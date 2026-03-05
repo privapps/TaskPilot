@@ -277,31 +277,107 @@ func TestJobService_CreateJob(t *testing.T) {
 
 For more testing best practices, see the existing test files in `services/*_test.go`.
 
-## MCP Testing
+## MCP Server Integration
 
-### Model Context Protocol (MCP)
+TaskPilot implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), enabling integration with AI agents (like GitHub Copilot or VS Code extensions) for programmatic job management and automation. You can connect to the MCP server using either HTTP (for direct/SSE clients) or via the local `mcp-local` proxy for stdio-based agents.
 
-TaskPilot implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) to allow AI agents (like GitHub Copilot) to manage jobs.
+### MCP Connection Types
 
-#### AI Safety & Constraints
-- **Naming Enforcement**: All jobs created via MCP are automatically prefixed with `ai_` to distinguish them from user-created jobs.
-- **Sound Disabled**: MCP-created jobs have the `sound_file` property cleared to ensure silent background execution.
-
-#### Connecting via Copilot
-To use TaskPilot with GitHub Copilot CLI or IDE, use the provided `mcp-local` proxy:
-
+#### 1. HTTP (Direct/SSE)
+- The MCP server endpoint is available at: `http://localhost:<API_PORT>/api/mcp`
+- Supports JSON-RPC 2.0 over HTTP POST. SSE (server-sent events) are supported for real-time updates to subscribed clients.
+- **Default port**: 8080 (but your TaskPilot might use a different port; see below).
+- 
+**How to Connect:**
 ```bash
-# In your Copilot configuration
-# command: /path/to/taskpilot/mcp-local/mcp-local
-# env: TASKPILOT_PORT=41327
+# Test connectivity (replace <API_PORT> with your actual port)
+curl -X POST http://localhost:<API_PORT>/api/mcp \
+     -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+```
+- To consume live events, connect using EventSource/SSE client to `/api/mcp/events` (if your framework supports it).
+
+#### 2. Local Proxy (`mcp-local`) — For Copilot/VS Code/stdio/CLI Agents
+- The `mcp-local` binary bridges stdio-based MCP clients and the TaskPilot HTTP server.
+- Required for integrating with GitHub Copilot, VS Code MCP extension, or other tools that require a stdio transport.
+
+Build the proxy:
+```bash
+cd mcp-local
+go build
 ```
 
-For more information on the MCP implementation, see `services/mcp_server.go`.
+Launch (using your API port):
+```bash
+./mcp-local --url=http://localhost:<API_PORT>
+# or set env variable
+export TASKPILOT_API_URL=http://localhost:<API_PORT>
+./mcp-local
+```
+
+#### 3. GitHub Copilot/VS Code Config Example
+- **Find your port:** Check TaskPilot startup logs for the actual API port (often NOT `8080`). 
+
+GitHub Copilot (`~/.copilot/mcp-config.json`):
+```json
+{
+  "mcpServers": {
+    "taskpilot": {
+      "type": "stdio",
+      "command": "/absolute/path/to/TaskPilot/mcp-local/mcp-local",
+      "args": ["--url", "http://localhost:8080"]
+    }
+  }
+}
+```
+
+VS Code example (`settings.json`):
+```json
+{
+  "mcp.servers": {
+    "taskpilot": {
+      "command": "/absolute/path/to/TaskPilot/mcp-local/mcp-local",
+      "args": ["--url", "http://localhost:8080"]
+    }
+  }
+}
+```
+
+**Auto-Setup:**
+To auto-generate the config and detect your API port:
+```bash
+./scripts/setup-copilot-mcp.sh
+```
+
+#### Troubleshooting
+- **Request timed out errors:** Ensure the MCP proxy or client uses the correct TaskPilot API port (not always 8080!).
+- **Copilot CLI hangs:** Use the provided wrapper (`mcp-local-wrapper.sh`) to silence stderr logs.
+- **See [scripts/README.md](scripts/README.md) and [mcp-local/README.md](mcp-local/README.md) for additional troubleshooting details.**
+
+#### Supported Tools
+TaskPilot's MCP supports these 9 tools:
+1. jobs_create – Create a new job (with `ai_` prefix enforced)
+2. jobs_get – Get job by ID
+3. jobs_list – List all jobs (or only AI jobs)
+4. jobs_update – Update job (prefix enforced)
+5. jobs_delete – Delete job
+6. jobs_execute – Run job instantly
+7. jobs_pause – Pause job scheduling
+8. jobs_resume – Unpause job scheduling
+9. jobs_history – View execution logs
+
+**All jobs created via MCP are prefixed `ai_` and are silent by default (sound file is cleared).**
+
+---
+
+## MCP Testing
+
+TaskPilot ships with scripts for fully automated MCP protocol & integration testing.
 
 ### Test Scripts
 
-- **`test-mcp-http.sh`** - Tests all MCP methods via direct HTTP POST
-- **`test-mcp-local.sh`** - Tests all MCP methods via the mcp-local stdio proxy
+- **`test-mcp-http.sh`** – Test MCP methods via direct HTTP POST
+- **`test-mcp-local.sh`** – Test MCP via the mcp-local stdio proxy
 
 ### Running MCP Tests
 
@@ -313,15 +389,16 @@ TASKPILOT_PORT=41327 ./scripts/test-mcp-http.sh
 TASKPILOT_PORT=41327 ./scripts/test-mcp-local.sh
 ```
 
-**Note:** Set `TASKPILOT_PORT` to match your TaskPilot API server port (check startup logs or defaults settings).
+**Note:** Set `TASKPILOT_PORT` to match your TaskPilot API server port (see logs or Defaults Settings page).
 
 ### Requirements
+- **jq** – for parsing test results (`brew install jq`)
+- **curl** – for HTTP requests
+- **mcp-local** – for local (stdio) integration (build from `/mcp-local`)
 
-- **jq** - JSON processor (`brew install jq` or `apt-get install jq`)
-- **curl** - HTTP client (included on most systems)
-- **mcp-local** - For stdio proxy tests (build from `mcp-local/`)
-
-For detailed information, see [scripts/README.md](scripts/README.md).
+See also:
+- [scripts/README.md](scripts/README.md)
+- [mcp-local/README.md](mcp-local/README.md)
 
 ## License
 

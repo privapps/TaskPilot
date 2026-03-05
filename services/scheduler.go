@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"runtime"
 	"time"
 
 	"taskpilot/db"
@@ -14,11 +15,15 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+// MacOSWakeLeadTime is how far before a scheduled cron fire time we wake the Mac.
+const MacOSWakeLeadTime = 2 * time.Minute
+
 type Scheduler struct {
 	cron       *cron.Cron
 	jobService *JobService
 	entryMap   map[string]cron.EntryID // maps job ID to cron entry ID
 	stopTicker chan bool               // channel to stop the one-time job ticker
+	wakeMap    map[string]time.Time   // maps job ID to registered pmset wake time
 }
 
 func NewScheduler(jobService *JobService) *Scheduler {
@@ -27,6 +32,7 @@ func NewScheduler(jobService *JobService) *Scheduler {
 		jobService: jobService,
 		entryMap:   make(map[string]cron.EntryID),
 		stopTicker: make(chan bool),
+		wakeMap:    make(map[string]time.Time),
 	}
 }
 
@@ -51,6 +57,23 @@ func (s *Scheduler) Start(ctx context.Context) error {
 
 	s.cron.Start()
 	log.Println("Scheduler started")
+
+	// Register macOS wake events for all scheduled cron jobs (task 4.1)
+	for jobID, entryID := range s.entryMap {
+		entry := s.cron.Entry(entryID)
+		if !entry.Next.IsZero() {
+			// Find the job to check opt-out flag
+			jobs, err := s.jobService.GetJobs()
+			if err == nil {
+				for _, j := range jobs {
+					if j.ID == jobID {
+						s.registerWakeEvent(j, entry.Next)
+						break
+					}
+				}
+			}
+		}
+	}
 
 	// Start ticker for checking one-time jobs
 	go s.checkOneTimeJobs(ctx)
@@ -93,8 +116,21 @@ func (s *Scheduler) ScheduleJob(job models.Job) error {
 		return nil
 	}
 
-	// For cron jobs, use the cron scheduler
+	// For cron jobs, use the cron scheduler.
+	// entryID is declared before AddFunc so the closure can capture it by reference
+	// and read it at fire time (by which point AddFunc has returned and assigned it).
+	var entryID cron.EntryID
 	entryID, err := s.cron.AddFunc(job.Schedule, func() {
+		// Detect if the system was sleeping and caused the cron to fire late.
+		// entry.Prev is set to the scheduled fire time by the cron library before
+		// starting this goroutine, so it reflects when the job *should* have started.
+		if entry := s.cron.Entry(entryID); !entry.Prev.IsZero() {
+			if delay := time.Since(entry.Prev); delay > 2*time.Minute {
+				log.Printf("WARNING: Job '%s' fired %v late (scheduled: %v, actual: %v). System may have been sleeping.",
+					job.Name, delay.Round(time.Second),
+					entry.Prev.Format("15:04:05"), time.Now().Format("15:04:05"))
+			}
+		}
 		s.runJob(job)
 	})
 	if err != nil {
@@ -102,11 +138,16 @@ func (s *Scheduler) ScheduleJob(job models.Job) error {
 	}
 
 	s.entryMap[job.ID] = entryID
+	// Register macOS wake event for the first scheduled fire time (task 3.5)
+	if entry := s.cron.Entry(entryID); !entry.Next.IsZero() {
+		s.registerWakeEvent(job, entry.Next)
+	}
 	log.Printf("Scheduled cron job: %s with schedule: %s", job.Name, job.Schedule)
 	return nil
 }
 
 func (s *Scheduler) UnscheduleJob(jobID string) {
+	s.cancelWakeEvent(jobID) // cancel any pending macOS wake event (task 3.6)
 	if entryID, exists := s.entryMap[jobID]; exists {
 		s.cron.Remove(entryID)
 		delete(s.entryMap, jobID)
@@ -160,6 +201,14 @@ func (s *Scheduler) checkOneTimeJobs(ctx context.Context) {
 				if (job.ScheduleType == models.ScheduleTypeDelay || job.ScheduleType == models.ScheduleTypeDatetime) &&
 					job.RunAt != nil && *job.RunAt <= now && job.Status != "running" {
 					log.Printf("Triggering one-time job: %s (run_at=%d, now=%d)", job.Name, *job.RunAt, now)
+
+					// Update status to "running" immediately to prevent duplicate triggers
+					job.Status = "running"
+					if _, err := s.jobService.updateJob(job, false); err != nil {
+						log.Printf("Failed to update job status before execution: %v", err)
+						continue
+					}
+
 					go s.runJob(job)
 				}
 			}
@@ -186,11 +235,11 @@ func (s *Scheduler) runJob(job models.Job) {
 		log.Printf("Failed to update job status: %v", err)
 	}
 
-	// Execute the command
+	// Execute the command (wrap with caffeinate on macOS to prevent sleep mid-run)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", job.Command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", wrapWithCaffeinate(job.Command, job.DisableMacosSleepPrevention))
 	if job.Directory != "" {
 		cmd.Dir = job.Directory
 	}
@@ -253,12 +302,19 @@ func (s *Scheduler) runJob(job models.Job) {
 	}
 
 	// Create history entry
-	s.createHistory(job.ID, output, exitCode, duration)
+	s.createHistory(job.ID, output, exitCode, startTime, duration)
+
+	// Re-register macOS wake event for the next scheduled fire time (task 3.7)
+	if job.ScheduleType == models.ScheduleTypeCron {
+		if entryID, exists := s.entryMap[job.ID]; exists {
+			if entry := s.cron.Entry(entryID); !entry.Next.IsZero() {
+				s.registerWakeEvent(job, entry.Next)
+			}
+		}
+	}
 
 	log.Printf("Job %s completed with exit code %d in %v", job.Name, exitCode, duration)
 }
-
-// runJobImmediate executes a job immediately without checking if it's paused
 // This is used for manual triggers where the user explicitly wants to run the job
 func (s *Scheduler) runJobImmediate(job models.Job) {
 	log.Printf("Executing job immediately (bypassing pause check): %s", job.Name)
@@ -269,11 +325,11 @@ func (s *Scheduler) runJobImmediate(job models.Job) {
 		log.Printf("Failed to update job status: %v", err)
 	}
 
-	// Execute the command
+	// Execute the command (wrap with caffeinate on macOS to prevent sleep mid-run)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", job.Command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", wrapWithCaffeinate(job.Command, job.DisableMacosSleepPrevention))
 	if job.Directory != "" {
 		cmd.Dir = job.Directory
 	}
@@ -336,7 +392,7 @@ func (s *Scheduler) runJobImmediate(job models.Job) {
 	}
 
 	// Create history entry
-	s.createHistory(job.ID, output, exitCode, duration)
+	s.createHistory(job.ID, output, exitCode, startTime, duration)
 
 	log.Printf("Job %s completed with exit code %d in %v", job.Name, exitCode, duration)
 }
@@ -351,11 +407,11 @@ func (s *Scheduler) runImmediateJob(job models.Job) {
 		log.Printf("Failed to update job status: %v", err)
 	}
 
-	// Execute the command
+	// Execute the command (wrap with caffeinate on macOS to prevent sleep mid-run)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", job.Command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", wrapWithCaffeinate(job.Command, job.DisableMacosSleepPrevention))
 	if job.Directory != "" {
 		cmd.Dir = job.Directory
 	}
@@ -415,7 +471,7 @@ func (s *Scheduler) runImmediateJob(job models.Job) {
 	}
 
 	// Create history entry
-	s.createHistory(job.ID, output, exitCode, duration)
+	s.createHistory(job.ID, output, exitCode, startTime, duration)
 
 	log.Printf("Immediate job %s completed with exit code %d in %v", job.Name, exitCode, duration)
 }
@@ -443,11 +499,11 @@ func (s *Scheduler) playSound(soundFile string) {
 	}
 }
 
-func (s *Scheduler) createHistory(jobID string, output string, exitCode int, duration time.Duration) {
+func (s *Scheduler) createHistory(jobID string, output string, exitCode int, startTime time.Time, duration time.Duration) {
 	query := `INSERT INTO history (id, job_id, output, exit_code, timestamp, duration_ms) VALUES (?, ?, ?, ?, ?, ?)`
 
 	durationMs := duration.Milliseconds()
-	timestamp := time.Now().Unix()
+	timestamp := startTime.Unix() // record when the job started, not when it completed
 
 	if _, err := db.DB.Exec(query, generateHistoryID(), jobID, output, exitCode, timestamp, durationMs); err != nil {
 		log.Printf("Failed to create history entry: %v", err)
@@ -456,4 +512,83 @@ func (s *Scheduler) createHistory(jobID string, output string, exitCode int, dur
 
 func generateHistoryID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+// wrapWithCaffeinate wraps cmd with `caffeinate -s --` on macOS to assert a
+// PreventSystemSleep power assertion for the duration of the job. Falls back to
+// the original command if caffeinate is not on PATH or the opt-out flag is set.
+func wrapWithCaffeinate(cmd string, disabled bool) string {
+	if disabled || runtime.GOOS != "darwin" {
+		return cmd
+	}
+	if _, err := exec.LookPath("caffeinate"); err != nil {
+		log.Printf("WARNING: caffeinate not found on PATH, running job without sleep prevention: %v", err)
+		return cmd
+	}
+	return "caffeinate -s -- sh -c " + shellQuote(cmd)
+}
+
+// shellQuote wraps s in single quotes, escaping any embedded single quotes.
+func shellQuote(s string) string {
+	// Replace ' with '\'' and wrap the whole thing in single quotes
+	result := "'"
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\'' {
+			result += "'\\''"
+		} else {
+			result += string(s[i])
+		}
+	}
+	return result + "'"
+}
+
+// registerWakeEvent schedules a macOS pmset wake event before nextFire so the
+// system is awake when the cron timer fires. No-op on non-darwin or when opted out.
+func (s *Scheduler) registerWakeEvent(job models.Job, nextFire time.Time) {
+	if runtime.GOOS != "darwin" || job.DisableMacosSleepPrevention {
+		return
+	}
+
+	wakeTime := nextFire.Add(-MacOSWakeLeadTime)
+	if wakeTime.Before(time.Now()) {
+		// Wake time already passed — nothing to schedule
+		return
+	}
+
+	// pmset expects: MM/dd/yy HH:mm:ss
+	wakeStr := wakeTime.Format("01/02/06 15:04:05")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "pmset", "schedule", "wake", wakeStr)
+	if err := cmd.Run(); err != nil {
+		log.Printf("WARNING: Failed to register pmset wake for job '%s' at %s: %v", job.Name, wakeStr, err)
+		return
+	}
+
+	s.wakeMap[job.ID] = wakeTime
+	log.Printf("Registered macOS wake event for job '%s' at %s (fires at %s)",
+		job.Name, wakeStr, nextFire.Format("15:04:05"))
+}
+
+// cancelWakeEvent cancels a previously registered pmset wake event for a job.
+func (s *Scheduler) cancelWakeEvent(jobID string) {
+	wakeTime, exists := s.wakeMap[jobID]
+	if !exists || runtime.GOOS != "darwin" {
+		return
+	}
+
+	wakeStr := wakeTime.Format("01/02/06 15:04:05")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "pmset", "cancel", "wake", wakeStr)
+	if err := cmd.Run(); err != nil {
+		// Cancel failures are non-fatal — duplicate wake events are harmless
+		log.Printf("Note: pmset cancel wake for job %s returned: %v", jobID, err)
+	}
+
+	delete(s.wakeMap, jobID)
 }

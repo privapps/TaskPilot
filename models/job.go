@@ -21,9 +21,10 @@ type Job struct {
 	Status       string `json:"status"`
 	ScheduleType string `json:"schedule_type"`
 	Paused       bool   `json:"paused"`
-	RunAt        *int64 `json:"run_at,omitempty"`        // Unix timestamp for one-time execution
-	DelayMinutes *int   `json:"delay_minutes,omitempty"` // Delay in minutes for delay-based scheduling
-	LastRunAt    *int64 `json:"last_run_at,omitempty"`   // Unix timestamp of most recent execution
+	RunAt                      *int64 `json:"run_at,omitempty"`                        // Unix timestamp for one-time execution
+	DelayMinutes               *int   `json:"delay_minutes,omitempty"`                 // Delay in minutes for delay-based scheduling
+	LastRunAt                  *int64 `json:"last_run_at,omitempty"`                   // Unix timestamp of most recent execution
+	DisableMacosSleepPrevention bool  `json:"disable_macos_sleep_prevention,omitempty"` // Skip caffeinate wrap and pmset wake on macOS
 }
 
 // History represents a job execution record

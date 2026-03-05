@@ -466,7 +466,7 @@ Use the `mcp-local` stdio-to-HTTP proxy for MCP clients that only support stdio 
 - No protocol interpretation - pure transparent proxy
 - Requires TaskPilot application running on localhost:8080
 
-**Installation & Configuration:** See [mcp-local/README.md](mcp-local/README.md) for detailed setup instructions including GitHub Copilot integration.
+**Installation & Configuration:** See [mcp-local/README.md](../mcp-local/README.md) and [scripts/README.md](../scripts/README.md) for detailed setup instructions, up-to-date CLI flags, troubleshooting, and Copilot/VS Code integration.
 
 **Quick example:**
 ```bash
@@ -1046,72 +1046,78 @@ TaskPilot provides an HTTP-based MCP server using Server-Sent Events (SSE) for r
 
 3. Restart Claude Desktop for the configuration to take effect.
 
-### GitHub Copilot (VS Code)
+### GitHub Copilot & VS Code Setup
 
-GitHub Copilot's MCP support currently only accepts `stdio` or `local` type servers, not HTTP-based servers. To use TaskPilot with GitHub Copilot, you'll need a stdio bridge wrapper.
+GitHub Copilot and most VS Code MCP extensions require a stdio-based bridge to communicate with TaskPilot. Use the included `mcp-local` Go binary (all prior JavaScript bridge scripts are deprecated and should not be used):
 
 **Quick Setup (Recommended):**
 
 Run the automated setup script:
 ```bash
-cd /path/to/TaskPilot
 ./scripts/setup-copilot-mcp.sh
 ```
 
 This script will:
-- Automatically detect the correct paths
-- Create the configuration file at `~/.copilot/mcp-config.json`
-- Test the connection
-- Back up any existing configuration
+- Detect your TaskPilot API port automatically
+- Build/configure the `mcp-local` binary path
+- Write the correct `~/.copilot/mcp-config.json` (Copilot) or print settings for VS Code extensions
+- Test your configuration and provide next steps
 
 **Manual Setup:**
 
-1. **Locate the bridge script** included with TaskPilot:
-   ```
-   scripts/copilot-mcp-bridge.js
-   ```
+1. **Build the stdio proxy:**
+    ```bash
+    cd mcp-local
+    # You must have Go (https://golang.org/dl/) installed.
+    (cd mcp-local && go build)
+    ```
 
-2. **Configure GitHub Copilot** by creating or editing `~/.copilot/mcp-config.json`:
+2. **Configure GitHub Copilot:** Create or edit `~/.copilot/mcp-config.json`:
+    ```json
+    {
+      "mcpServers": {
+        "taskpilot": {
+          "type": "stdio",
+          "command": "/ABSOLUTE/PATH/TO/TaskPilot/mcp-local/mcp-local",
+          "args": ["--url", "http://localhost:41327"]
+        }
+      }
+    }
+    ```
+    *(Replace `/ABSOLUTE/PATH/TO/TaskPilot` with your actual absolute path. To get it, run `pwd` in your terminal inside the TaskPilot directory, or use your File Explorer/Finder to copy the absolute path. Use the correct API port, as shown in TaskPilot Settings (or in the application logs under the Settings → Defaults section after startup).)*
 
-   ```json
-   {
-     "mcpServers": {
-       "taskpilot": {
-         "type": "stdio",
-         "command": "node",
-         "args": ["/ABSOLUTE/PATH/TO/TaskPilot/scripts/copilot-mcp-bridge.js"],
-         "env": {
-           "TASKPILOT_PORT": "8080"
-         }
-       }
-     }
-   }
-   ```
+3. **VS Code Extensions:** In `settings.json`:
+    ```json
+    {
+      "mcp.servers": {
+        "taskpilot": {
+          "command": "/ABSOLUTE/PATH/TO/TaskPilot/mcp-local/mcp-local",
+          "args": ["--url", "http://localhost:41327"]
+        }
+      }
+    }
+    ```
 
-   **Replace** `/ABSOLUTE/PATH/TO/TaskPilot` with the actual path to your TaskPilot installation.
-   
-   *Tip: An example configuration is available in `scripts/copilot-mcp-config.example.json`*
-
-3. **Restart VS Code** for the configuration to take effect.
+4. **Restart VS Code** (or Copilot) for config changes to take effect. To quickly reload your workspace in VS Code, use `Ctrl+Shift+P` (Windows/Linux) or `Cmd+Shift+P` (Mac), then type and select **Reload Window**.
 
 **Verify Setup:**
-```bash
-# Test the bridge manually
-echo '{"jsonrpc":"2.0","id":"1","method":"jobs/list","params":{}}' | node scripts/copilot-mcp-bridge.js
-```
+- Use Copilot's “MCP: Show Server Status” command to see `✓ taskpilot Connected`.
+- Or run:
+    ```bash
+    echo '{"jsonrpc":"2.0","id":"1","method":"jobs/list","params":{}}' | ./mcp-local/mcp-local --url http://localhost:41327
+    ```
+    You should see a JSON response with your jobs list.
+- Additionally, you can manually verify that the `mcp-local` binary is working (before integration) with:
+    ```bash
+    ./mcp-local/mcp-local --url http://localhost:41327
+    ```
+    The command should not immediately error and should accept input. If you see an error, check permissions and build results.
 
-You should see a JSON response with your jobs list.
 
-In VS Code:
-- Open GitHub Copilot Chat
-- Try asking: "List all jobs in TaskPilot"
-- The bridge script logs to stderr, which you can view in VS Code's Output panel (select "MCP" from the dropdown)
-
-**Important Limitations:**
-- GitHub Copilot's MCP integration is still evolving
-- Real-time SSE events (job.created, job.completed, etc.) won't work through the stdio bridge
-- Only synchronous JSON-RPC requests/responses are supported
-- For full functionality with real-time events, consider using Claude Desktop or other tools with native HTTP MCP support
+**Limitations:**
+- SSE (real-time events) are not available via stdio bridge—use HTTP/SSE for live notifications.
+- The only supported bridge is the Go-based `mcp-local` binary described above.
+- Ignore references to nonexistent scripts such as `scripts/copilot-mcp-bridge.js` in any older docs.
 
 ### VS Code (via Cline/Cursor/Roo Code)
 

@@ -44,3 +44,8 @@ Thumbs.db
 mcp-local/mcp-local
 opencode.json
 taskpilot
+# Ignore runtime PID files
+*.pid
+# Ignore runtime PID files
+*.pid
+backend.pid

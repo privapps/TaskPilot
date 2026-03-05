@@ -42,7 +42,8 @@ func (s *JobService) SetScheduler(scheduler *Scheduler) {
 func (s *JobService) GetJobs() ([]models.Job, error) {
 	query := `SELECT 
 		j.id, j.name, j.command, j.directory, j.schedule, j.sound_file, j.on_success_cmd, j.last_result, j.status, 
-		COALESCE(j.schedule_type, 'cron'), COALESCE(j.paused, 0), j.run_at, j.delay_minutes, j.last_run_at
+		COALESCE(j.schedule_type, 'cron'), COALESCE(j.paused, 0), j.run_at, j.delay_minutes, j.last_run_at,
+		COALESCE(j.disable_macos_sleep_prevention, 0)
 		FROM jobs j
 		ORDER BY j.name`
 
@@ -60,7 +61,8 @@ func (s *JobService) GetJobs() ([]models.Job, error) {
 		var lastRunAt sql.NullInt64
 		err := rows.Scan(&job.ID, &job.Name, &job.Command, &job.Directory, &job.Schedule,
 			&job.SoundFile, &job.OnSuccessCmd, &job.LastResult, &job.Status,
-			&job.ScheduleType, &job.Paused, &runAt, &delayMinutes, &lastRunAt)
+			&job.ScheduleType, &job.Paused, &runAt, &delayMinutes, &lastRunAt,
+			&job.DisableMacosSleepPrevention)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan job: %w", err)
 		}
@@ -124,11 +126,11 @@ func (s *JobService) CreateJob(job models.Job) (models.Job, error) {
 			job.Name, *job.RunAt, time.Now().Unix(), *job.RunAt-time.Now().Unix())
 	}
 
-	query := `INSERT INTO jobs (id, name, command, directory, schedule, sound_file, on_success_cmd, last_result, status, schedule_type, paused, run_at, delay_minutes, last_run_at) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO jobs (id, name, command, directory, schedule, sound_file, on_success_cmd, last_result, status, schedule_type, paused, run_at, delay_minutes, last_run_at, disable_macos_sleep_prevention) 
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := s.db.Exec(query, job.ID, job.Name, job.Command, job.Directory, job.Schedule,
-		job.SoundFile, job.OnSuccessCmd, job.LastResult, job.Status, job.ScheduleType, job.Paused, job.RunAt, job.DelayMinutes, job.LastRunAt)
+		job.SoundFile, job.OnSuccessCmd, job.LastResult, job.Status, job.ScheduleType, job.Paused, job.RunAt, job.DelayMinutes, job.LastRunAt, job.DisableMacosSleepPrevention)
 	if err != nil {
 		return models.Job{}, fmt.Errorf("failed to create job: %w", err)
 	}
@@ -167,10 +169,10 @@ func (s *JobService) updateJob(job models.Job, notifyScheduler bool) (models.Job
 	}
 
 	query := `UPDATE jobs SET name = ?, command = ?, directory = ?, schedule = ?, sound_file = ?, on_success_cmd = ?, last_result = ?, status = ?, 
-		schedule_type = ?, paused = ?, run_at = ?, delay_minutes = ?, last_run_at = ? WHERE id = ?`
+		schedule_type = ?, paused = ?, run_at = ?, delay_minutes = ?, last_run_at = ?, disable_macos_sleep_prevention = ? WHERE id = ?`
 
 	result, err := s.db.Exec(query, job.Name, job.Command, job.Directory, job.Schedule, job.SoundFile, job.OnSuccessCmd, job.LastResult, job.Status,
-		job.ScheduleType, job.Paused, job.RunAt, job.DelayMinutes, job.LastRunAt, job.ID)
+		job.ScheduleType, job.Paused, job.RunAt, job.DelayMinutes, job.LastRunAt, job.DisableMacosSleepPrevention, job.ID)
 	if err != nil {
 		return models.Job{}, fmt.Errorf("failed to update job: %w", err)
 	}
@@ -248,7 +250,8 @@ func (s *JobService) DeleteJob(id string) error {
 
 func (s *JobService) GetJobByID(id string) (models.Job, error) {
 	query := `SELECT id, name, command, directory, schedule, sound_file, on_success_cmd, last_result, status,
-		COALESCE(schedule_type, 'cron'), COALESCE(paused, 0), run_at, delay_minutes 
+		COALESCE(schedule_type, 'cron'), COALESCE(paused, 0), run_at, delay_minutes,
+		COALESCE(disable_macos_sleep_prevention, 0)
 		FROM jobs WHERE id = ?`
 
 	var job models.Job
@@ -256,7 +259,7 @@ func (s *JobService) GetJobByID(id string) (models.Job, error) {
 	var delayMinutes sql.NullInt64
 	err := s.db.QueryRow(query, id).Scan(&job.ID, &job.Name, &job.Command, &job.Directory, &job.Schedule,
 		&job.SoundFile, &job.OnSuccessCmd, &job.LastResult, &job.Status,
-		&job.ScheduleType, &job.Paused, &runAt, &delayMinutes)
+		&job.ScheduleType, &job.Paused, &runAt, &delayMinutes, &job.DisableMacosSleepPrevention)
 
 	if err == sql.ErrNoRows {
 		return models.Job{}, fmt.Errorf("job with ID %s not found", id)

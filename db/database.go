@@ -118,6 +118,9 @@ func migrate() error {
 	// Add last_run_at column for tracking last execution time
 	_, _ = DB.Exec(`ALTER TABLE jobs ADD COLUMN last_run_at INTEGER`)
 
+	// Add disable_macos_sleep_prevention column for per-job opt-out of macOS sleep prevention
+	_, _ = DB.Exec(`ALTER TABLE jobs ADD COLUMN disable_macos_sleep_prevention BOOLEAN DEFAULT 0`)
+
 	// Backfill last_run_at from history table for existing jobs
 	_, _ = DB.Exec(`
 		UPDATE jobs 
