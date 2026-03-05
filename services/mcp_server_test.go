@@ -208,8 +208,10 @@ func TestMCPJobCreateWithPrefixEnforcement(t *testing.T) {
 		{
 			name: "Normal job creation",
 			params: map[string]interface{}{
-				"name":    "test_job",
-				"command": "echo test",
+				"name":          "test_job",
+				"command":       "echo test",
+				"schedule":      "0 * * * *",
+				"schedule_type": "cron",
 			},
 			expectedName: "ai_test_job",
 			expectError:  false,
@@ -217,8 +219,10 @@ func TestMCPJobCreateWithPrefixEnforcement(t *testing.T) {
 		{
 			name: "Job with ai_ prefix",
 			params: map[string]interface{}{
-				"name":    "ai_existing_job",
-				"command": "echo test",
+				"name":          "ai_existing_job",
+				"command":       "echo test",
+				"schedule":      "0 * * * *",
+				"schedule_type": "cron",
 			},
 			expectedName: "ai_existing_job",
 			expectError:  false,
@@ -226,9 +230,11 @@ func TestMCPJobCreateWithPrefixEnforcement(t *testing.T) {
 		{
 			name: "Job with sound file should be cleared",
 			params: map[string]interface{}{
-				"name":       "sound_job",
-				"command":    "echo test",
-				"sound_file": "/path/to/sound.wav",
+				"name":          "sound_job",
+				"command":       "echo test",
+				"sound_file":    "/path/to/sound.wav",
+				"schedule":      "0 * * * *",
+				"schedule_type": "cron",
 			},
 			expectedName: "ai_sound_job",
 			expectError:  false,

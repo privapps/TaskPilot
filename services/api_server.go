@@ -244,9 +244,11 @@ func (s *APIServer) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Schedule type, cron syntax, and datetime validation are performed by jobService.CreateJob
+	// via ValidateJob (see services/validation.go) to keep validation in one place across all callers.
 	createdJob, err := s.jobService.CreateJob(job)
 	if err != nil {
-		s.sendError(w, fmt.Sprintf("Failed to create job: %v", err), http.StatusInternalServerError)
+		s.sendError(w, fmt.Sprintf("Failed to create job: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -281,6 +283,9 @@ func (s *APIServer) handleUpdateJob(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// Schedule type, cron syntax, and datetime validation are performed by jobService.UpdateJob
+	// via ValidateJob (see services/validation.go) to keep validation in one place across all callers.
+
 	// Check if job exists
 	jobs, err := s.jobService.GetJobs()
 	if err != nil {
@@ -303,7 +308,7 @@ func (s *APIServer) handleUpdateJob(w http.ResponseWriter, r *http.Request, id s
 
 	updatedJob, err := s.jobService.UpdateJob(job)
 	if err != nil {
-		s.sendError(w, fmt.Sprintf("Failed to update job: %v", err), http.StatusInternalServerError)
+		s.sendError(w, fmt.Sprintf("Failed to update job: %v", err), http.StatusBadRequest)
 		return
 	}
 

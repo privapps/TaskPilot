@@ -55,6 +55,7 @@ export namespace models {
 	    run_at?: number;
 	    delay_minutes?: number;
 	    last_run_at?: number;
+	    disable_macos_sleep_prevention?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Job(source);
@@ -76,6 +77,7 @@ export namespace models {
 	        this.run_at = source["run_at"];
 	        this.delay_minutes = source["delay_minutes"];
 	        this.last_run_at = source["last_run_at"];
+	        this.disable_macos_sleep_prevention = source["disable_macos_sleep_prevention"];
 	    }
 	}
 

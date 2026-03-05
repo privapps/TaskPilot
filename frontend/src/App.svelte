@@ -29,6 +29,7 @@
   let loading = false;
   let error = '';
   let successMessage = '';
+  let successTimeout = null; // Track timeout to prevent race conditions
   let scheduleType = 'cron'; // For form control
   let wailsReady = false;
   
@@ -210,6 +211,37 @@
     return `${(ms / 1000).toFixed(2)}s`;
   }
 
+  // Converts a Unix timestamp (seconds) into a local datetime string (YYYY-MM-DDTHH:mm)
+  // suitable for datetime-local inputs. Adjusts for the local timezone offset so the
+  // displayed time matches what the user originally scheduled.
+  function convertUnixToLocalDatetime(unixSeconds) {
+    const date = new Date(unixSeconds * 1000); // Convert seconds to milliseconds
+    // Adjust for local timezone offset to get the wall-clock time
+    const adjustedTime = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return adjustedTime.toISOString().slice(0, 16); // Keep only YYYY-MM-DDTHH:mm
+  }
+
+  // Validates that a datetime string represents a future point in time.
+  // Returns an error message string, or null if valid.
+  function validateFutureDatetime(dateString) {
+    const dt = new Date(dateString);
+    if (isNaN(dt.getTime())) {
+      return 'Invalid date/time value';
+    }
+    if (dt.getTime() <= Date.now()) {
+      return 'Scheduled time must be in the future';
+    }
+    return null;
+  }
+
+  // Shows a success message that auto-clears after 3 seconds.
+  // Cancels any pending clear to avoid race conditions when messages fire in quick succession.
+  function showSuccess(message) {
+    successMessage = message;
+    if (successTimeout) clearTimeout(successTimeout);
+    successTimeout = setTimeout(() => { successMessage = ''; successTimeout = null; }, 3000);
+  }
+
   async function handleCreateJob() {
     if (!wailsReady) {
       error = 'Application is still initializing. Please wait...';
@@ -233,6 +265,13 @@
     if (scheduleType === 'datetime' && !newJob.run_at) {
       error = 'Datetime is required';
       return;
+    }
+    if (scheduleType === 'datetime' && newJob.run_at) {
+      const validationError = validateFutureDatetime(newJob.run_at);
+      if (validationError) {
+        error = validationError;
+        return;
+      }
     }
     // No validation needed for immediate - it runs right away
 
@@ -367,9 +406,13 @@
   async function handleTriggerJob(jobId) {
     try {
       error = '';
+      const triggerJob = jobs.find(j => j.id === jobId);
+      if (!triggerJob) {
+        console.warn(`Job with ID ${jobId} not found in local list.`);
+      }
       await TriggerJob(jobId);
-      successMessage = 'Job triggered successfully';
-      setTimeout(() => successMessage = '', 3000);
+      const jobName = triggerJob?.name || `ID: ${jobId}`;
+      showSuccess(`Job "${jobName}" triggered successfully`);
       await loadJobs();
     } catch (err) {
       error = 'Failed to trigger job: ' + err;
@@ -391,7 +434,7 @@
       on_success_cmd: job.on_success_cmd || '',
       schedule_type: job.schedule_type || 'cron',
       delay_minutes: job.delay_minutes || null,
-      run_at: job.run_at ? new Date(job.run_at * 1000).toISOString().slice(0, 16) : null,
+      run_at: job.run_at ? convertUnixToLocalDatetime(job.run_at) : null,
       disable_macos_sleep_prevention: job.disable_macos_sleep_prevention || false
     };
     
@@ -402,10 +445,8 @@
   async function handleExport() {
     try {
       error = '';
-      successMessage = '';
       await ExportJobsWithDialog();
-      successMessage = 'Jobs exported successfully!';
-      setTimeout(() => { successMessage = ''; }, 3000);
+      showSuccess('Jobs exported successfully!');
     } catch (err) {
       if (err) { // Don't show error if user cancelled
         error = 'Failed to export jobs: ' + err;
@@ -417,7 +458,6 @@
   async function handleImport() {
     try {
       error = '';
-      successMessage = '';
       
       // Open file dialog and check for defaults
       const result = await PrepareImportWithDialog();
@@ -444,12 +484,11 @@
       await ImportJobsFromFile(result.filepath);
       
       if (result.hasDefaults) {
-        successMessage = 'Jobs and defaults imported successfully!';
+        showSuccess('Jobs and defaults imported successfully!');
       } else {
-        successMessage = 'Jobs imported successfully!';
+        showSuccess('Jobs imported successfully!');
       }
       
-      setTimeout(() => { successMessage = ''; }, 3000);
       await loadJobs();
     } catch (err) {
       if (err) { // Don't show error if user cancelled
@@ -460,8 +499,7 @@
   }
 
   function handleDefaultsSaved() {
-    successMessage = 'Default settings saved successfully!';
-    setTimeout(() => { successMessage = ''; }, 3000);
+    showSuccess('Default settings saved successfully!');
   }
 
   async function handleDeleteHistory(historyId) {
@@ -494,6 +532,7 @@
     try {
       await DeleteAllJobHistory(selectedJobId);
       selectedJobHistory = [];
+      closeHistoryModal();
     } catch (err) {
       error = 'Failed to clear history: ' + err;
       console.error('Clear all history error:', err);
@@ -749,6 +788,12 @@
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onclick={closeModal}>
       <div class="bg-gray-800 rounded-lg p-6 max-w-2xl w-full shadow-xl max-h-[90vh] overflow-y-auto" onclick={(e) => e.stopPropagation()}>
         <h2 class="text-2xl font-semibold mb-6">{editingJob ? 'Edit Job' : 'Create New Job'}</h2>
+        
+        {#if error}
+          <div class="mb-4 p-4 bg-red-900/30 border border-red-700 rounded-md text-red-300">
+            {error}
+          </div>
+        {/if}
         
         <form onsubmit={(e) => { e.preventDefault(); handleCreateJob(); }} class="space-y-4">
           <div>

@@ -226,11 +226,15 @@ func (s *MCPServer) handleToolsList(ctx context.Context, req MCPRequest) MCPResp
 					},
 					"schedule": map[string]interface{}{
 						"type":        "string",
-						"description": "Cron expression for scheduling",
+						"description": "For cron type: cron expression (e.g. '0 9 * * 1-5'). For datetime type: ISO 8601 datetime string (e.g. '2026-03-05T14:30:00'). Not required for delay or immediate types.",
 					},
 					"schedule_type": map[string]interface{}{
 						"type":        "string",
-						"description": "Schedule type: cron, delay, datetime, or immediate",
+						"description": "Schedule type: 'cron' (recurring cron expression), 'datetime' (run once at specific ISO 8601 datetime in schedule field), 'delay' (run once after delay_minutes), or 'immediate' (run now)",
+					},
+					"delay_minutes": map[string]interface{}{
+						"type":        "integer",
+						"description": "Minutes to delay execution. Only used when schedule_type is 'delay'.",
 					},
 				},
 				"required": []string{"command"},
@@ -659,7 +663,7 @@ func (s *MCPServer) handleJobCreate(ctx context.Context, req MCPRequest) MCPResp
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Error: &MCPError{
-				Code:    MCPErrorInternalError,
+				Code:    MCPErrorInvalidParams,
 				Message: "Failed to create job: " + err.Error(),
 			},
 		}

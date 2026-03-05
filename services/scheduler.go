@@ -200,6 +200,15 @@ func (s *Scheduler) checkOneTimeJobs(ctx context.Context) {
 				// Check if this is a one-time job that should run now
 				if (job.ScheduleType == models.ScheduleTypeDelay || job.ScheduleType == models.ScheduleTypeDatetime) &&
 					job.RunAt != nil && *job.RunAt <= now && job.Status != "running" {
+
+					// Skip stale jobs: scheduled more than 5 minutes ago and never ran.
+					// A 5-minute window tolerates brief app restarts; anything older is
+					// considered missed and should not be retroactively executed.
+					if now-*job.RunAt > 5*60 && job.LastRunAt == nil {
+						log.Printf("Skipping stale one-time job '%s': scheduled %ds ago, never ran", job.Name, now-*job.RunAt)
+						continue
+					}
+
 					log.Printf("Triggering one-time job: %s (run_at=%d, now=%d)", job.Name, *job.RunAt, now)
 
 					// Update status to "running" immediately to prevent duplicate triggers

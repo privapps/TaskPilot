@@ -24,8 +24,8 @@ func TestAPIServer_HandleTriggerJob_Success(t *testing.T) {
 	jobCommand := "echo test"
 
 	// Mock GetJobByID query
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes"}).
-		AddRow(jobID, jobName, jobCommand, "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "disable_macos_sleep_prevention"}).
+		AddRow(jobID, jobName, jobCommand, "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, false)
 	mock.ExpectQuery("SELECT .* FROM jobs WHERE id").WithArgs(jobID).WillReturnRows(rows)
 
 	// Mock job status update (happens during execution)
@@ -97,8 +97,8 @@ func TestAPIServer_HandleJobByID_TriggerRoute(t *testing.T) {
 	jobName := "Test Job"
 
 	// Mock GetJobByID query
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes"}).
-		AddRow(jobID, jobName, "echo test", "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "disable_macos_sleep_prevention"}).
+		AddRow(jobID, jobName, "echo test", "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, false)
 	mock.ExpectQuery("SELECT .* FROM jobs WHERE id").WithArgs(jobID).WillReturnRows(rows)
 
 	// Mock job status update

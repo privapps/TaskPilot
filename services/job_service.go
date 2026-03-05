@@ -112,6 +112,11 @@ func (s *JobService) CreateJob(job models.Job) (models.Job, error) {
 		// Continue with job creation even if defaults fail
 	}
 
+	// Validate job schedule fields
+	if err := ValidateJob(job); err != nil {
+		return models.Job{}, err
+	}
+
 	// Calculate run_at for delay-based scheduling
 	if job.ScheduleType == models.ScheduleTypeDelay && job.DelayMinutes != nil {
 		runAt := CalculateRunAt(*job.DelayMinutes)
@@ -120,7 +125,30 @@ func (s *JobService) CreateJob(job models.Job) (models.Job, error) {
 			runAt, job.Name, *job.DelayMinutes, time.Now().Unix())
 	}
 
-	// Log datetime run_at if provided
+	// For datetime jobs, derive run_at from the schedule string if run_at is not already set.
+	// The AI (and other clients) naturally pass an ISO 8601 datetime in schedule.
+	if job.ScheduleType == models.ScheduleTypeDatetime && job.RunAt == nil && job.Schedule != "" {
+		formats := []string{
+			time.RFC3339,
+			"2006-01-02T15:04:05",
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04",
+		}
+		for _, format := range formats {
+			if t, err := time.ParseInLocation(format, job.Schedule, time.Local); err == nil {
+				runAt := t.Unix()
+				job.RunAt = &runAt
+				log.Printf("CreateJob: Parsed run_at=%d from schedule '%s' for datetime job '%s'",
+					runAt, job.Schedule, job.Name)
+				break
+			}
+		}
+		if job.RunAt == nil {
+			return models.Job{}, fmt.Errorf("datetime job requires a valid ISO 8601 datetime in schedule field, got: %s", job.Schedule)
+		}
+	}
+
+	// Validate datetime run_at is in the future
 	if job.ScheduleType == models.ScheduleTypeDatetime && job.RunAt != nil {
 		log.Printf("CreateJob: Datetime job '%s' with run_at=%d (current_time=%d, in %d seconds)",
 			job.Name, *job.RunAt, time.Now().Unix(), *job.RunAt-time.Now().Unix())
@@ -146,6 +174,9 @@ func (s *JobService) CreateJob(job models.Job) (models.Job, error) {
 }
 
 func (s *JobService) UpdateJob(job models.Job) (models.Job, error) {
+	if err := ValidateJob(job); err != nil {
+		return models.Job{}, err
+	}
 	return s.updateJob(job, true)
 }
 
@@ -162,7 +193,6 @@ func (s *JobService) updateJob(job models.Job, notifyScheduler bool) (models.Job
 			runAt, job.Name, *job.DelayMinutes, time.Now().Unix())
 	}
 
-	// Log datetime run_at if provided
 	if job.ScheduleType == models.ScheduleTypeDatetime && job.RunAt != nil {
 		log.Printf("UpdateJob: Datetime job '%s' with run_at=%d (current_time=%d, in %d seconds)",
 			job.Name, *job.RunAt, time.Now().Unix(), *job.RunAt-time.Now().Unix())
@@ -250,16 +280,17 @@ func (s *JobService) DeleteJob(id string) error {
 
 func (s *JobService) GetJobByID(id string) (models.Job, error) {
 	query := `SELECT id, name, command, directory, schedule, sound_file, on_success_cmd, last_result, status,
-		COALESCE(schedule_type, 'cron'), COALESCE(paused, 0), run_at, delay_minutes,
+		COALESCE(schedule_type, 'cron'), COALESCE(paused, 0), run_at, delay_minutes, last_run_at,
 		COALESCE(disable_macos_sleep_prevention, 0)
 		FROM jobs WHERE id = ?`
 
 	var job models.Job
 	var runAt sql.NullInt64
 	var delayMinutes sql.NullInt64
+	var lastRunAt sql.NullInt64
 	err := s.db.QueryRow(query, id).Scan(&job.ID, &job.Name, &job.Command, &job.Directory, &job.Schedule,
 		&job.SoundFile, &job.OnSuccessCmd, &job.LastResult, &job.Status,
-		&job.ScheduleType, &job.Paused, &runAt, &delayMinutes, &job.DisableMacosSleepPrevention)
+		&job.ScheduleType, &job.Paused, &runAt, &delayMinutes, &lastRunAt, &job.DisableMacosSleepPrevention)
 
 	if err == sql.ErrNoRows {
 		return models.Job{}, fmt.Errorf("job with ID %s not found", id)
@@ -275,6 +306,10 @@ func (s *JobService) GetJobByID(id string) (models.Job, error) {
 	if delayMinutes.Valid {
 		val := int(delayMinutes.Int64)
 		job.DelayMinutes = &val
+	}
+	if lastRunAt.Valid {
+		val := lastRunAt.Int64
+		job.LastRunAt = &val
 	}
 
 	return job, nil

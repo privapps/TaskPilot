@@ -1,0 +1,8 @@
+@server_base = http://localhost:41370/api
+
+
+### api doc
+GET {{server_base}}/swagger
+
+### Get all jobs
+GET {{server_base}}/jobs
