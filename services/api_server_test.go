@@ -24,8 +24,8 @@ func TestAPIServer_HandleTriggerJob_Success(t *testing.T) {
 	jobCommand := "echo test"
 
 	// Mock GetJobByID query
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "disable_macos_sleep_prevention"}).
-		AddRow(jobID, jobName, jobCommand, "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, false)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"}).
+		AddRow(jobID, jobName, jobCommand, "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, nil, nil, false)
 	mock.ExpectQuery("SELECT .* FROM jobs WHERE id").WithArgs(jobID).WillReturnRows(rows)
 
 	// Mock job status update (happens during execution)
@@ -97,8 +97,8 @@ func TestAPIServer_HandleJobByID_TriggerRoute(t *testing.T) {
 	jobName := "Test Job"
 
 	// Mock GetJobByID query
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "disable_macos_sleep_prevention"}).
-		AddRow(jobID, jobName, "echo test", "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, false)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"}).
+		AddRow(jobID, jobName, "echo test", "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, nil, nil, false)
 	mock.ExpectQuery("SELECT .* FROM jobs WHERE id").WithArgs(jobID).WillReturnRows(rows)
 
 	// Mock job status update
@@ -141,5 +141,106 @@ func TestAPIServer_HandleJobByID_TriggerRoute_WrongMethod(t *testing.T) {
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("Expected status 405, got %d", w.Code)
+	}
+}
+
+func TestAPIServer_HandleSystemTimezones_OK(t *testing.T) {
+	sqlDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("Failed to create mock: %v", err)
+	}
+	defer sqlDB.Close()
+
+	wrapper := &db.Database{DB: sqlDB}
+	service := NewJobServiceWithDB(wrapper)
+	apiServer := NewAPIServer(service, 8080)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/system/timezones", nil)
+	w := httptest.NewRecorder()
+
+	apiServer.handleSystemTimezones(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Expected status 200, got %d", w.Code)
+	}
+
+	var resp TimezonesResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	// current timezone must be non-empty
+	if resp.Current == "" {
+		t.Error("Expected non-empty current timezone")
+	}
+
+	// list must contain well-known entries
+	found := false
+	for _, tz := range resp.Timezones {
+		if tz == "UTC" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected UTC in timezones list")
+	}
+
+	if len(resp.Timezones) < 100 {
+		t.Errorf("Expected at least 100 timezones, got %d", len(resp.Timezones))
+	}
+}
+
+func TestAPIServer_HandleSystemTimezones_MethodNotAllowed(t *testing.T) {
+	sqlDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("Failed to create mock: %v", err)
+	}
+	defer sqlDB.Close()
+
+	wrapper := &db.Database{DB: sqlDB}
+	service := NewJobServiceWithDB(wrapper)
+	apiServer := NewAPIServer(service, 8080)
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/api/system/timezones", nil)
+		w := httptest.NewRecorder()
+		apiServer.handleSystemTimezones(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("method %s: expected 405, got %d", method, w.Code)
+		}
+	}
+}
+
+func TestAPIServer_HandleSystemTimezones_ValidIANA(t *testing.T) {
+	sqlDB, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("Failed to create mock: %v", err)
+	}
+	defer sqlDB.Close()
+
+	wrapper := &db.Database{DB: sqlDB}
+	service := NewJobServiceWithDB(wrapper)
+	apiServer := NewAPIServer(service, 8080)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/system/timezones", nil)
+	w := httptest.NewRecorder()
+	apiServer.handleSystemTimezones(w, req)
+
+	var resp TimezonesResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	// Spot-check a handful of well-known IANA names are present
+	must := []string{"America/New_York", "America/Los_Angeles", "Europe/London", "Asia/Tokyo", "Australia/Sydney", "UTC"}
+	tzSet := make(map[string]bool, len(resp.Timezones))
+	for _, tz := range resp.Timezones {
+		tzSet[tz] = true
+	}
+	for _, want := range must {
+		if !tzSet[want] {
+			t.Errorf("Expected %q in timezones list", want)
+		}
 	}
 }

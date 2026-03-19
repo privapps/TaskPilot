@@ -25,6 +25,8 @@ export namespace models {
 	    exit_code: number;
 	    timestamp: number;
 	    duration_ms: number;
+	    scheduled_at?: number;
+	    trigger_type?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new History(source);
@@ -38,6 +40,8 @@ export namespace models {
 	        this.exit_code = source["exit_code"];
 	        this.timestamp = source["timestamp"];
 	        this.duration_ms = source["duration_ms"];
+	        this.scheduled_at = source["scheduled_at"];
+	        this.trigger_type = source["trigger_type"];
 	    }
 	}
 	export class Job {
@@ -55,6 +59,8 @@ export namespace models {
 	    run_at?: number;
 	    delay_minutes?: number;
 	    last_run_at?: number;
+	    next_run_at?: number;
+	    last_scheduled_at?: number;
 	    disable_macos_sleep_prevention?: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -77,6 +83,8 @@ export namespace models {
 	        this.run_at = source["run_at"];
 	        this.delay_minutes = source["delay_minutes"];
 	        this.last_run_at = source["last_run_at"];
+	        this.next_run_at = source["next_run_at"];
+	        this.last_scheduled_at = source["last_scheduled_at"];
 	        this.disable_macos_sleep_prevention = source["disable_macos_sleep_prevention"];
 	    }
 	}
@@ -85,6 +93,26 @@ export namespace models {
 
 export namespace services {
 	
+	export class LaunchAgentStatus {
+	    label: string;
+	    plist_path: string;
+	    installed: boolean;
+	    loaded: boolean;
+	    port: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new LaunchAgentStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.label = source["label"];
+	        this.plist_path = source["plist_path"];
+	        this.installed = source["installed"];
+	        this.loaded = source["loaded"];
+	        this.port = source["port"];
+	    }
+	}
 	export class Scheduler {
 	
 	

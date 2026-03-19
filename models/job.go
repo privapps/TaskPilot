@@ -10,31 +10,35 @@ const (
 
 // Job represents a scheduled task
 type Job struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Command      string `json:"command"`
-	Directory    string `json:"directory"`
-	Schedule     string `json:"schedule"`
-	SoundFile    string `json:"sound_file"`
-	OnSuccessCmd string `json:"on_success_cmd"`
-	LastResult   string `json:"last_result"`
-	Status       string `json:"status"`
-	ScheduleType string `json:"schedule_type"`
-	Paused       bool   `json:"paused"`
-	RunAt                      *int64 `json:"run_at,omitempty"`                        // Unix timestamp for one-time execution
-	DelayMinutes               *int   `json:"delay_minutes,omitempty"`                 // Delay in minutes for delay-based scheduling
-	LastRunAt                  *int64 `json:"last_run_at,omitempty"`                   // Unix timestamp of most recent execution
-	DisableMacosSleepPrevention bool  `json:"disable_macos_sleep_prevention,omitempty"` // Skip caffeinate wrap and pmset wake on macOS
+	ID                          string `json:"id"`
+	Name                        string `json:"name"`
+	Command                     string `json:"command"`
+	Directory                   string `json:"directory"`
+	Schedule                    string `json:"schedule"`
+	SoundFile                   string `json:"sound_file"`
+	OnSuccessCmd                string `json:"on_success_cmd"`
+	LastResult                  string `json:"last_result"`
+	Status                      string `json:"status"`
+	ScheduleType                string `json:"schedule_type"`
+	Paused                      bool   `json:"paused"`
+	RunAt                       *int64 `json:"run_at,omitempty"`                         // Unix timestamp for one-time execution
+	DelayMinutes                *int   `json:"delay_minutes,omitempty"`                  // Delay in minutes for delay-based scheduling
+	LastRunAt                   *int64 `json:"last_run_at,omitempty"`                    // Unix timestamp of most recent execution
+	NextRunAt                   *int64 `json:"next_run_at,omitempty"`                    // Persisted next scheduled execution time
+	LastScheduledAt             *int64 `json:"last_scheduled_at,omitempty"`              // Scheduled fire time of the most recent claimed run
+	DisableMacosSleepPrevention bool   `json:"disable_macos_sleep_prevention,omitempty"` // Skip caffeinate wrap and pmset wake on macOS
 }
 
 // History represents a job execution record
 type History struct {
-	ID         string `json:"id"`
-	JobID      string `json:"job_id"`
-	Output     string `json:"output"`
-	ExitCode   int    `json:"exit_code"`
-	Timestamp  int64  `json:"timestamp"`
-	DurationMs int64  `json:"duration_ms"`
+	ID          string `json:"id"`
+	JobID       string `json:"job_id"`
+	Output      string `json:"output"`
+	ExitCode    int    `json:"exit_code"`
+	Timestamp   int64  `json:"timestamp"`
+	DurationMs  int64  `json:"duration_ms"`
+	ScheduledAt *int64 `json:"scheduled_at,omitempty"`
+	TriggerType string `json:"trigger_type,omitempty"`
 }
 
 // Defaults represents default values for job fields

@@ -136,8 +136,8 @@
         
         // Priority 3: Sort by last execution time (most recent first)
         // Jobs with execution history come before jobs without
-        const aTime = a.last_run_at ? a.last_run_at : 0;
-        const bTime = b.last_run_at ? b.last_run_at : 0;
+        const aTime = a.last_run_at ? a.last_run_at : (a.last_scheduled_at || 0);
+        const bTime = b.last_run_at ? b.last_run_at : (b.last_scheduled_at || 0);
         
         if (aTime !== bTime) return bTime - aTime; // Descending order
         
@@ -565,12 +565,16 @@
     return job.schedule || 'N/A';
   }
 
-  function formatLastRun(lastRunAt) {
-    if (!lastRunAt) {
+  function formatLastRun(job) {
+    if (!job?.last_run_at) {
+      if (job?.last_result === 'missed' && job?.last_scheduled_at) {
+        const scheduledRun = new Date(job.last_scheduled_at * 1000);
+        return `Missed at ${scheduledRun.toLocaleTimeString()}`;
+      }
       return 'Never';
     }
     
-    const lastRun = new Date(lastRunAt * 1000);
+    const lastRun = new Date(job.last_run_at * 1000);
     const now = new Date();
     const diffMs = now - lastRun;
     const diffHours = diffMs / (1000 * 60 * 60);
@@ -702,6 +706,7 @@
                     <span class={`px-2 py-1 text-xs rounded-full ${
                       job.last_result === 'success' ? 'bg-green-900/30 text-green-400 border border-green-700' :
                       job.last_result === 'failed' ? 'bg-red-900/30 text-red-400 border border-red-700' :
+                      job.last_result === 'missed' ? 'bg-yellow-900/30 text-yellow-400 border border-yellow-700' :
                       'bg-gray-700 text-gray-400'
                     }`}>
                       {job.last_result}
@@ -775,7 +780,7 @@
                 {/if}
               </div>
               <div class="text-sm text-gray-500 text-right ml-4">
-                <span class="text-gray-400">Last run:</span> <span class="text-gray-300">{formatLastRun(job.last_run_at)}</span>
+                <span class="text-gray-400">Last run:</span> <span class="text-gray-300">{formatLastRun(job)}</span>
               </div>
             </div>
           </div>

@@ -131,10 +131,9 @@ func TestJobService_GetJobs_MultipleJobs(t *testing.T) {
 	}
 	defer sqlDB.Close()
 
-	// Mock GetJobs query with 14 columns (including last_run_at)
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at"}).
-		AddRow("id1", "Job 1", "echo 1", "/tmp", "0 * * * *", "", "", "", "pending", "cron", false, 0, 0, 0).
-		AddRow("id2", "Job 2", "echo 2", "/tmp", "0 0 * * *", "", "", "", "pending", "cron", false, 0, 0, 0)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"}).
+		AddRow("id1", "Job 1", "echo 1", "/tmp", "0 * * * *", "", "", "", "pending", "cron", false, 0, 0, 0, nil, nil, false).
+		AddRow("id2", "Job 2", "echo 2", "/tmp", "0 0 * * *", "", "", "", "pending", "cron", false, 0, 0, 0, nil, nil, false)
 
 	mock.ExpectQuery("SELECT").WillReturnRows(rows)
 
@@ -162,8 +161,7 @@ func TestJobService_GetJobs_EmptyDatabase(t *testing.T) {
 	}
 	defer sqlDB.Close()
 
-	// Mock empty result with 14 columns
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at"})
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"})
 	mock.ExpectQuery("SELECT").WillReturnRows(rows)
 
 	wrapper := &db.Database{DB: sqlDB}
@@ -247,9 +245,8 @@ func TestJobService_GetHistory(t *testing.T) {
 			}
 			defer sqlDB.Close()
 
-			// Mock history query - 6 columns: id, job_id, output, exit_code, timestamp, duration_ms
-			rows := sqlmock.NewRows([]string{"id", "job_id", "output", "exit_code", "timestamp", "duration_ms"}).
-				AddRow("hist1", "job1", "output1", 0, time.Now().Unix(), 100)
+			rows := sqlmock.NewRows([]string{"id", "job_id", "output", "exit_code", "timestamp", "duration_ms", "scheduled_at", "trigger_type"}).
+				AddRow("hist1", "job1", "output1", 0, time.Now().Unix(), 100, nil, "scheduled")
 
 			mock.ExpectQuery("SELECT").WillReturnRows(rows)
 
@@ -403,9 +400,8 @@ func TestJobService_GetJobByID(t *testing.T) {
 	defer sqlDB.Close()
 
 	jobID := uuid.New().String()
-	// Mock with 15 columns: added last_run_at, disable_macos_sleep_prevention
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "disable_macos_sleep_prevention"}).
-		AddRow(jobID, "Test Job", "echo test", "/tmp", "0 * * * *", "", "", "", "pending", "cron", false, 0, 0, nil, false)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"}).
+		AddRow(jobID, "Test Job", "echo test", "/tmp", "0 * * * *", "", "", "", "pending", "cron", false, 0, 0, nil, nil, nil, false)
 
 	mock.ExpectQuery("SELECT").WithArgs(jobID).WillReturnRows(rows)
 
@@ -454,9 +450,8 @@ func TestJobService_PauseJob(t *testing.T) {
 
 	jobID := uuid.New().String()
 
-	// Mock GetJobByID with 15 columns
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "disable_macos_sleep_prevention"}).
-		AddRow(jobID, "Test Job", "echo test", "/tmp", "0 * * * *", "", "", "", "pending", "cron", false, 0, 0, nil, false)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"}).
+		AddRow(jobID, "Test Job", "echo test", "/tmp", "0 * * * *", "", "", "", "pending", "cron", false, 0, 0, nil, nil, nil, false)
 	mock.ExpectQuery("SELECT").WithArgs(jobID).WillReturnRows(rows)
 
 	// Mock full update (PauseJob calls UpdateJob which updates all fields)
@@ -483,9 +478,8 @@ func TestJobService_ResumeJob(t *testing.T) {
 
 	jobID := uuid.New().String()
 
-	// Mock GetJobByID with 15 columns
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "disable_macos_sleep_prevention"}).
-		AddRow(jobID, "Test Job", "echo test", "/tmp", "0 * * * *", "", "", "", "pending", "cron", true, 0, 0, nil, false)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"}).
+		AddRow(jobID, "Test Job", "echo test", "/tmp", "0 * * * *", "", "", "", "pending", "cron", true, 0, 0, nil, nil, nil, false)
 	mock.ExpectQuery("SELECT").WithArgs(jobID).WillReturnRows(rows)
 
 	// Mock full update (ResumeJob calls UpdateJob which updates all fields)
@@ -517,9 +511,8 @@ func TestJobService_ExportJobs(t *testing.T) {
 		AddRow("/tmp", "sound.mp3", "echo done", 8080)
 	mock.ExpectQuery("SELECT .* FROM defaults").WillReturnRows(defaultsRows)
 
-	// Mock GetJobs query with 14 columns
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at"}).
-		AddRow("id1", "Job 1", "echo 1", "/tmp", "0 * * * *", "", "", "", "pending", "cron", false, 0, 0, 0)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"}).
+		AddRow("id1", "Job 1", "echo 1", "/tmp", "0 * * * *", "", "", "", "pending", "cron", false, 0, 0, 0, nil, nil, false)
 
 	mock.ExpectQuery("SELECT").WillReturnRows(rows)
 
@@ -631,8 +624,8 @@ func TestJobService_TriggerJob_Success(t *testing.T) {
 	jobCommand := "echo test"
 
 	// Mock GetJobByID query
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "disable_macos_sleep_prevention"}).
-		AddRow(jobID, jobName, jobCommand, "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, false)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"}).
+		AddRow(jobID, jobName, jobCommand, "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, nil, nil, false)
 	mock.ExpectQuery("SELECT .* FROM jobs WHERE id").WithArgs(jobID).WillReturnRows(rows)
 
 	wrapper := &db.Database{DB: sqlDB}
@@ -712,8 +705,8 @@ func TestJobService_TriggerJob_NoScheduler(t *testing.T) {
 	jobCommand := "echo test"
 
 	// Mock GetJobByID query
-	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "disable_macos_sleep_prevention"}).
-		AddRow(jobID, jobName, jobCommand, "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, false)
+	rows := sqlmock.NewRows([]string{"id", "name", "command", "directory", "schedule", "sound_file", "on_success_cmd", "last_result", "status", "schedule_type", "paused", "run_at", "delay_minutes", "last_run_at", "next_run_at", "last_scheduled_at", "disable_macos_sleep_prevention"}).
+		AddRow(jobID, jobName, jobCommand, "/tmp", "* * * * *", "", "", "", "idle", "cron", false, nil, nil, nil, nil, nil, false)
 	mock.ExpectQuery("SELECT .* FROM jobs WHERE id").WithArgs(jobID).WillReturnRows(rows)
 
 	wrapper := &db.Database{DB: sqlDB}

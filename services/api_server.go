@@ -44,6 +44,7 @@ func (s *APIServer) Start(ctx context.Context) error {
 
 	// System endpoints
 	mux.HandleFunc("/api/system/time", s.handleSystemTime)
+	mux.HandleFunc("/api/system/timezones", s.handleSystemTimezones)
 
 	// MCP endpoints
 	mux.HandleFunc("/api/mcp", s.handleMCP)
@@ -518,7 +519,152 @@ func (s *APIServer) handleSystemTime(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, response, http.StatusOK)
 }
 
-// handleSwagger serves the Swagger API documentation
+// TimezonesResponse is the payload returned by GET /api/system/timezones.
+type TimezonesResponse struct {
+	Current   string   `json:"current"`   // IANA name of the server's local timezone
+	Timezones []string `json:"timezones"` // Sorted list of all well-known IANA timezone names
+}
+
+// handleSystemTimezones returns the server's current timezone and the full list
+// of well-known IANA timezone names that clients may use (e.g. for job display).
+//
+// @Summary     List available timezones
+// @Description Returns the server's current IANA timezone and a sorted list of all
+// @Description well-known IANA timezone names.
+// @Tags        system
+// @Produce     json
+// @Success     200 {object} TimezonesResponse
+// @Router      /api/system/timezones [get]
+func (s *APIServer) handleSystemTimezones(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.sendError(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	zoneName, _ := time.Now().Zone()
+	s.sendJSON(w, TimezonesResponse{
+		Current:   zoneName,
+		Timezones: ianaTimezones,
+	}, http.StatusOK)
+}
+
+// ianaTimezones is a curated, sorted list of well-known IANA timezone names.
+// Source: IANA Time Zone Database (https://www.iana.org/time-zones)
+var ianaTimezones = []string{
+	"Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers",
+	"Africa/Asmara", "Africa/Bamako", "Africa/Bangui", "Africa/Banjul",
+	"Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura",
+	"Africa/Cairo", "Africa/Casablanca", "Africa/Ceuta", "Africa/Conakry",
+	"Africa/Dakar", "Africa/Dar_es_Salaam", "Africa/Djibouti", "Africa/Douala",
+	"Africa/El_Aaiun", "Africa/Freetown", "Africa/Gaborone", "Africa/Harare",
+	"Africa/Johannesburg", "Africa/Juba", "Africa/Kampala", "Africa/Khartoum",
+	"Africa/Kigali", "Africa/Kinshasa", "Africa/Lagos", "Africa/Libreville",
+	"Africa/Lome", "Africa/Luanda", "Africa/Lubumbashi", "Africa/Lusaka",
+	"Africa/Malabo", "Africa/Maputo", "Africa/Maseru", "Africa/Mbabane",
+	"Africa/Mogadishu", "Africa/Monrovia", "Africa/Nairobi", "Africa/Ndjamena",
+	"Africa/Niamey", "Africa/Nouakchott", "Africa/Ouagadougou", "Africa/Porto-Novo",
+	"Africa/Sao_Tome", "Africa/Tripoli", "Africa/Tunis", "Africa/Windhoek",
+	"America/Adak", "America/Anchorage", "America/Anguilla", "America/Antigua",
+	"America/Araguaina", "America/Argentina/Buenos_Aires", "America/Argentina/Catamarca",
+	"America/Argentina/Cordoba", "America/Argentina/Jujuy", "America/Argentina/La_Rioja",
+	"America/Argentina/Mendoza", "America/Argentina/Rio_Gallegos", "America/Argentina/Salta",
+	"America/Argentina/San_Juan", "America/Argentina/San_Luis", "America/Argentina/Tucuman",
+	"America/Argentina/Ushuaia", "America/Aruba", "America/Asuncion", "America/Atikokan",
+	"America/Bahia", "America/Bahia_Banderas", "America/Barbados", "America/Belem",
+	"America/Belize", "America/Blanc-Sablon", "America/Boa_Vista", "America/Bogota",
+	"America/Boise", "America/Cambridge_Bay", "America/Campo_Grande", "America/Cancun",
+	"America/Caracas", "America/Cayenne", "America/Cayman", "America/Chicago",
+	"America/Chihuahua", "America/Ciudad_Juarez", "America/Costa_Rica", "America/Creston",
+	"America/Cuiaba", "America/Curacao", "America/Danmarkshavn", "America/Dawson",
+	"America/Dawson_Creek", "America/Denver", "America/Detroit", "America/Dominica",
+	"America/Edmonton", "America/Eirunepe", "America/El_Salvador", "America/Fortaleza",
+	"America/Glace_Bay", "America/Godthab", "America/Goose_Bay", "America/Grand_Turk",
+	"America/Grenada", "America/Guadeloupe", "America/Guatemala", "America/Guayaquil",
+	"America/Guyana", "America/Halifax", "America/Havana", "America/Hermosillo",
+	"America/Indiana/Indianapolis", "America/Indiana/Knox", "America/Indiana/Marengo",
+	"America/Indiana/Petersburg", "America/Indiana/Tell_City", "America/Indiana/Vevay",
+	"America/Indiana/Vincennes", "America/Indiana/Winamac", "America/Inuvik",
+	"America/Iqaluit", "America/Jamaica", "America/Juneau", "America/Kentucky/Louisville",
+	"America/Kentucky/Monticello", "America/Kralendijk", "America/La_Paz", "America/Lima",
+	"America/Los_Angeles", "America/Lower_Princes", "America/Maceio", "America/Managua",
+	"America/Manaus", "America/Marigot", "America/Martinique", "America/Matamoros",
+	"America/Mazatlan", "America/Menominee", "America/Merida", "America/Metlakatla",
+	"America/Mexico_City", "America/Miquelon", "America/Moncton", "America/Monterrey",
+	"America/Montevideo", "America/Montserrat", "America/Nassau", "America/New_York",
+	"America/Nipigon", "America/Nome", "America/Noronha", "America/North_Dakota/Beulah",
+	"America/North_Dakota/Center", "America/North_Dakota/New_Salem", "America/Nuuk",
+	"America/Ojinaga", "America/Panama", "America/Pangnirtung", "America/Paramaribo",
+	"America/Phoenix", "America/Port-au-Prince", "America/Port_of_Spain", "America/Porto_Velho",
+	"America/Puerto_Rico", "America/Punta_Arenas", "America/Rainy_River", "America/Rankin_Inlet",
+	"America/Recife", "America/Regina", "America/Resolute", "America/Rio_Branco",
+	"America/Santa_Isabel", "America/Santarem", "America/Santiago", "America/Santo_Domingo",
+	"America/Sao_Paulo", "America/Scoresbysund", "America/Sitka", "America/St_Barthelemy",
+	"America/St_Johns", "America/St_Kitts", "America/St_Lucia", "America/St_Thomas",
+	"America/St_Vincent", "America/Swift_Current", "America/Tegucigalpa", "America/Thule",
+	"America/Thunder_Bay", "America/Tijuana", "America/Toronto", "America/Tortola",
+	"America/Vancouver", "America/Whitehorse", "America/Winnipeg", "America/Yakutat",
+	"America/Yellowknife",
+	"Antarctica/Casey", "Antarctica/Davis", "Antarctica/DumontDUrville",
+	"Antarctica/Macquarie", "Antarctica/Mawson", "Antarctica/McMurdo",
+	"Antarctica/Palmer", "Antarctica/Rothera", "Antarctica/South_Pole",
+	"Antarctica/Syowa", "Antarctica/Troll", "Antarctica/Vostok",
+	"Arctic/Longyearbyen",
+	"Asia/Aden", "Asia/Almaty", "Asia/Amman", "Asia/Anadyr", "Asia/Aqtau",
+	"Asia/Aqtobe", "Asia/Ashgabat", "Asia/Atyrau", "Asia/Baghdad", "Asia/Bahrain",
+	"Asia/Baku", "Asia/Bangkok", "Asia/Barnaul", "Asia/Beirut", "Asia/Bishkek",
+	"Asia/Brunei", "Asia/Chita", "Asia/Choibalsan", "Asia/Colombo", "Asia/Damascus",
+	"Asia/Dhaka", "Asia/Dili", "Asia/Dubai", "Asia/Dushanbe", "Asia/Famagusta",
+	"Asia/Gaza", "Asia/Hebron", "Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Hovd",
+	"Asia/Irkutsk", "Asia/Jakarta", "Asia/Jayapura", "Asia/Jerusalem", "Asia/Kabul",
+	"Asia/Kamchatka", "Asia/Karachi", "Asia/Kathmandu", "Asia/Khandyga", "Asia/Kolkata",
+	"Asia/Krasnoyarsk", "Asia/Kuala_Lumpur", "Asia/Kuching", "Asia/Kuwait",
+	"Asia/Macau", "Asia/Magadan", "Asia/Makassar", "Asia/Manila", "Asia/Muscat",
+	"Asia/Nicosia", "Asia/Novokuznetsk", "Asia/Novosibirsk", "Asia/Omsk",
+	"Asia/Oral", "Asia/Phnom_Penh", "Asia/Pontianak", "Asia/Pyongyang",
+	"Asia/Qatar", "Asia/Qostanay", "Asia/Qyzylorda", "Asia/Riyadh", "Asia/Sakhalin",
+	"Asia/Samarkand", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Srednekolymsk",
+	"Asia/Taipei", "Asia/Tashkent", "Asia/Tbilisi", "Asia/Tehran", "Asia/Thimphu",
+	"Asia/Tokyo", "Asia/Tomsk", "Asia/Ulaanbaatar", "Asia/Urumqi", "Asia/Ust-Nera",
+	"Asia/Vientiane", "Asia/Vladivostok", "Asia/Yakutsk", "Asia/Yangon",
+	"Asia/Yekaterinburg", "Asia/Yerevan",
+	"Atlantic/Azores", "Atlantic/Bermuda", "Atlantic/Canary", "Atlantic/Cape_Verde",
+	"Atlantic/Faroe", "Atlantic/Madeira", "Atlantic/Reykjavik", "Atlantic/South_Georgia",
+	"Atlantic/St_Helena", "Atlantic/Stanley",
+	"Australia/Adelaide", "Australia/Brisbane", "Australia/Broken_Hill",
+	"Australia/Darwin", "Australia/Eucla", "Australia/Hobart", "Australia/Lindeman",
+	"Australia/Lord_Howe", "Australia/Melbourne", "Australia/Perth", "Australia/Sydney",
+	"Europe/Amsterdam", "Europe/Andorra", "Europe/Astrakhan", "Europe/Athens",
+	"Europe/Belgrade", "Europe/Berlin", "Europe/Bratislava", "Europe/Brussels",
+	"Europe/Bucharest", "Europe/Budapest", "Europe/Busingen", "Europe/Chisinau",
+	"Europe/Copenhagen", "Europe/Dublin", "Europe/Gibraltar", "Europe/Guernsey",
+	"Europe/Helsinki", "Europe/Isle_of_Man", "Europe/Istanbul", "Europe/Jersey",
+	"Europe/Kaliningrad", "Europe/Kiev", "Europe/Kirov", "Europe/Kyiv",
+	"Europe/Lisbon", "Europe/Ljubljana", "Europe/London", "Europe/Luxembourg",
+	"Europe/Madrid", "Europe/Malta", "Europe/Mariehamn", "Europe/Minsk",
+	"Europe/Monaco", "Europe/Moscow", "Europe/Nicosia", "Europe/Oslo",
+	"Europe/Paris", "Europe/Podgorica", "Europe/Prague", "Europe/Riga",
+	"Europe/Rome", "Europe/Samara", "Europe/San_Marino", "Europe/Sarajevo",
+	"Europe/Saratov", "Europe/Simferopol", "Europe/Skopje", "Europe/Sofia",
+	"Europe/Stockholm", "Europe/Tallinn", "Europe/Tirane", "Europe/Ulyanovsk",
+	"Europe/Uzhgorod", "Europe/Vaduz", "Europe/Vatican", "Europe/Vienna",
+	"Europe/Vilnius", "Europe/Volgograd", "Europe/Warsaw", "Europe/Zagreb",
+	"Europe/Zaporozhye", "Europe/Zurich",
+	"Indian/Antananarivo", "Indian/Chagos", "Indian/Christmas", "Indian/Cocos",
+	"Indian/Comoro", "Indian/Kerguelen", "Indian/Mahe", "Indian/Maldives",
+	"Indian/Mauritius", "Indian/Mayotte", "Indian/Reunion",
+	"Pacific/Apia", "Pacific/Auckland", "Pacific/Bougainville", "Pacific/Chatham",
+	"Pacific/Chuuk", "Pacific/Easter", "Pacific/Efate", "Pacific/Fakaofo",
+	"Pacific/Fiji", "Pacific/Funafuti", "Pacific/Galapagos", "Pacific/Gambier",
+	"Pacific/Guadalcanal", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Kanton",
+	"Pacific/Kiritimati", "Pacific/Kosrae", "Pacific/Kwajalein", "Pacific/Majuro",
+	"Pacific/Marquesas", "Pacific/Midway", "Pacific/Nauru", "Pacific/Niue",
+	"Pacific/Norfolk", "Pacific/Noumea", "Pacific/Pago_Pago", "Pacific/Palau",
+	"Pacific/Pitcairn", "Pacific/Pohnpei", "Pacific/Port_Moresby", "Pacific/Rarotonga",
+	"Pacific/Saipan", "Pacific/Tahiti", "Pacific/Tarawa", "Pacific/Tongatapu",
+	"Pacific/Wake", "Pacific/Wallis",
+	"UTC",
+}
+
 func (s *APIServer) handleSwagger(w http.ResponseWriter, r *http.Request) {
 	swagger := map[string]interface{}{
 		"openapi": "3.0.0",
@@ -869,38 +1015,65 @@ func (s *APIServer) handleSwagger(w http.ResponseWriter, r *http.Request) {
 					},
 				},
 			},
+			"/api/system/timezones": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "List available timezones",
+					"description": "Returns the server's current IANA timezone and a sorted list of all well-known IANA timezone names",
+					"tags":        []string{"system"},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Success",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"$ref": "#/components/schemas/Timezones",
+									},
+									"example": map[string]interface{}{
+										"current":   "America/Los_Angeles",
+										"timezones": []string{"Africa/Abidjan", "America/Los_Angeles", "Asia/Tokyo", "Europe/London", "UTC"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
 		},
 		"components": map[string]interface{}{
 			"schemas": map[string]interface{}{
 				"Job": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":             map[string]interface{}{"type": "string"},
-						"name":           map[string]interface{}{"type": "string"},
-						"command":        map[string]interface{}{"type": "string"},
-						"directory":      map[string]interface{}{"type": "string"},
-						"schedule":       map[string]interface{}{"type": "string"},
-						"sound_file":     map[string]interface{}{"type": "string"},
-						"on_success_cmd": map[string]interface{}{"type": "string"},
-						"last_result":    map[string]interface{}{"type": "string"},
-						"status":         map[string]interface{}{"type": "string"},
-						"schedule_type":  map[string]interface{}{"type": "string"},
-						"paused":         map[string]interface{}{"type": "boolean"},
-						"run_at":         map[string]interface{}{"type": "integer", "format": "int64"},
-						"delay_minutes":  map[string]interface{}{"type": "integer"},
-						"last_run_at":    map[string]interface{}{"type": "integer", "format": "int64"},
+						"id":                map[string]interface{}{"type": "string"},
+						"name":              map[string]interface{}{"type": "string"},
+						"command":           map[string]interface{}{"type": "string"},
+						"directory":         map[string]interface{}{"type": "string"},
+						"schedule":          map[string]interface{}{"type": "string"},
+						"sound_file":        map[string]interface{}{"type": "string"},
+						"on_success_cmd":    map[string]interface{}{"type": "string"},
+						"last_result":       map[string]interface{}{"type": "string"},
+						"status":            map[string]interface{}{"type": "string"},
+						"schedule_type":     map[string]interface{}{"type": "string"},
+						"paused":            map[string]interface{}{"type": "boolean"},
+						"run_at":            map[string]interface{}{"type": "integer", "format": "int64"},
+						"delay_minutes":     map[string]interface{}{"type": "integer"},
+						"last_run_at":       map[string]interface{}{"type": "integer", "format": "int64"},
+						"next_run_at":       map[string]interface{}{"type": "integer", "format": "int64"},
+						"last_scheduled_at": map[string]interface{}{"type": "integer", "format": "int64"},
 					},
 					"required": []string{"name", "command", "schedule"},
 				},
 				"History": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":          map[string]interface{}{"type": "string"},
-						"job_id":      map[string]interface{}{"type": "string"},
-						"output":      map[string]interface{}{"type": "string"},
-						"exit_code":   map[string]interface{}{"type": "integer"},
-						"timestamp":   map[string]interface{}{"type": "integer", "format": "int64"},
-						"duration_ms": map[string]interface{}{"type": "integer", "format": "int64"},
+						"id":           map[string]interface{}{"type": "string"},
+						"job_id":       map[string]interface{}{"type": "string"},
+						"output":       map[string]interface{}{"type": "string"},
+						"exit_code":    map[string]interface{}{"type": "integer"},
+						"timestamp":    map[string]interface{}{"type": "integer", "format": "int64"},
+						"duration_ms":  map[string]interface{}{"type": "integer", "format": "int64"},
+						"scheduled_at": map[string]interface{}{"type": "integer", "format": "int64"},
+						"trigger_type": map[string]interface{}{"type": "string"},
 					},
 				},
 				"SystemTime": map[string]interface{}{
@@ -911,6 +1084,13 @@ func (s *APIServer) handleSwagger(w http.ResponseWriter, r *http.Request) {
 						"timezone":           map[string]interface{}{"type": "string", "description": "IANA timezone name (e.g., America/Los_Angeles, UTC)"},
 						"timezone_offset":    map[string]interface{}{"type": "string", "description": "Timezone offset from UTC (e.g., -08:00, +05:30)"},
 						"utc_offset_seconds": map[string]interface{}{"type": "integer", "description": "UTC offset in seconds"},
+					},
+				},
+				"Timezones": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"current":   map[string]interface{}{"type": "string", "description": "IANA name of the server's local timezone"},
+						"timezones": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Sorted list of all well-known IANA timezone names"},
 					},
 				},
 			},
@@ -924,14 +1104,18 @@ func (s *APIServer) handleSwagger(w http.ResponseWriter, r *http.Request) {
 func (s *APIServer) sendJSON(w http.ResponseWriter, data interface{}, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Failed to encode JSON response: %v", err)
+	}
 }
 
 // sendError sends an error response
 func (s *APIServer) sendError(w http.ResponseWriter, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	if err := json.NewEncoder(w).Encode(map[string]string{"error": message}); err != nil {
+		log.Printf("Failed to encode error response: %v", err)
+	}
 }
 
 // handleMCP routes MCP requests - GET for SSE connection, POST for JSON-RPC requests

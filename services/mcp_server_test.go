@@ -266,21 +266,26 @@ func TestMCPJobCreateWithPrefixEnforcement(t *testing.T) {
 					return
 				}
 
-				// Check result content
-				if job, ok := resp.Result.(models.Job); ok {
-					if job.Name != tt.expectedName {
-						t.Errorf("Expected job name %s, got %s", tt.expectedName, job.Name)
+				if toolResult, ok := resp.Result.(MCPToolResult); ok {
+					if len(toolResult.Content) == 0 {
+						t.Fatal("expected MCP tool result content")
 					}
-					// Verify sound_file is empty
-					if job.SoundFile != "" {
-						t.Errorf("Expected empty sound_file, got %s", job.SoundFile)
+					var decoded models.Job
+					if err := json.Unmarshal([]byte(toolResult.Content[0].Text), &decoded); err != nil {
+						t.Fatalf("failed to decode MCP tool result: %v", err)
+					}
+					if decoded.Name != tt.expectedName {
+						t.Errorf("Expected job name %s, got %s", tt.expectedName, decoded.Name)
+					}
+					if decoded.SoundFile != "" {
+						t.Errorf("Expected empty sound_file, got %s", decoded.SoundFile)
 					}
 					return
 				}
 
 				resultMap, ok := resp.Result.(map[string]interface{})
 				if !ok {
-					t.Errorf("Result is not a map or a models.Job, got %T", resp.Result)
+					t.Errorf("Result is not a map or MCP tool result, got %T", resp.Result)
 					return
 				}
 
@@ -334,10 +339,7 @@ func TestMCPJobTrigger(t *testing.T) {
 	jobID := "test-job-id"
 
 	// Mock the GetJobByID call
-	mockDB.QueryRowFunc = func(query string, args ...interface{}) *sql.Row {
-		// Create a mock row with job data
-		return &sql.Row{}
-	}
+	mockDB.QueryRowFunc = func(query string, args ...interface{}) *sql.Row { return nil }
 	mockDB.ExecFunc = func(query string, args ...interface{}) (sql.Result, error) {
 		return &db.MockResult{}, nil
 	}

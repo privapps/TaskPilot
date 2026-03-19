@@ -13,12 +13,14 @@ TaskPilot follows an "openspec" specification-driven development process. All ma
 
 - Create, update, and delete scheduled jobs (spec: openspec/changes/initial-setup/specs/job-management/spec.md)
 - SQLite database for persistent storage
+- Durable DB-backed scheduler state (`next_run_at`, `last_scheduled_at`) so timing survives restarts
 - Modern UI with Svelte 5 and Tailwind CSS (spec: openspec/changes/initial-setup/specs/project-structure/spec.md)
 - Cross-platform support (macOS, Windows, Linux)
 - **REST API server** for programmatic access to job management (spec: openspec/changes/rest-api-server/specs/rest-api-server/spec.md)
 - Interactive Swagger API documentation
 - Job execution history tracking (`/api/jobs/{job_id}/history` endpoint, spec: openspec/changes/api-enhancements/specs/job-history-endpoint/spec.md)
 - Default job settings configuration (API server port and more; configurable, restart required)
+- macOS LaunchAgent support for running the headless daemon outside the GUI process
 - All major features and APIs are covered by testable requirements and scenarios in openspec docs
 
 ## Tech Stack
@@ -61,13 +63,96 @@ This will start the application with hot-reload enabled for both frontend and ba
 
 ## Building
 
-To build the application for production:
+### GUI Build (with frontend)
+
+To build the full application with GUI:
 
 ```bash
 wails build
 ```
 
 The built application will be in the `build/bin` directory.
+
+### Go-only Build (Headless/API-only)
+
+To build the Go binary only (no GUI frontend), use the Makefile. The project uses a **pure-Go SQLite driver** (`modernc.org/sqlite`) so no C toolchain or CGO is needed for any platform.
+
+```bash
+# Build for current platform
+make build
+
+# Cross-compile for all platforms — no extra toolchain needed
+make build-all
+
+# Build specific platform/arch
+make build-linux          # Linux x64 + ARM64
+make build-linux-amd64
+make build-windows-arm64
+make build-darwin-arm64
+```
+
+Binaries are output to `build/bin/taskpilot-{OS}-{ARCH}` (statically linked on Linux).
+
+| Target | OS | Architectures |
+|--------|----|---------------|
+| `make build-linux` | Linux | amd64, arm64 |
+| `make build-windows` | Windows | amd64, arm64 |
+| `make build-darwin` | macOS | amd64, arm64 |
+| `make build-all` | All of the above | — |
+| `make test` | Run Go tests | — |
+| `make clean` | Remove build artifacts | — |
+
+
+## Headless (no-GUI) mode
+
+TaskPilot can run as a pure REST + SSE server with no GUI — useful on headless
+servers, in Docker containers, or whenever you only need the API. On macOS this
+is now the preferred long-running scheduler host: the GUI is the control plane,
+while the daemon owns scheduled execution.
+
+```bash
+# Start REST+SSE service on port 9999 (no window opened)
+./taskpilot --no-gui-with-port 9999
+```
+
+The flag accepts any valid TCP port (1–65535). All REST endpoints and the SSE /
+MCP endpoint are available at the specified port exactly as in GUI mode:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/jobs` | List jobs |
+| `POST /api/jobs` | Create job |
+| `GET /api/history` | Execution history |
+| `GET /api/mcp` | SSE stream (MCP) |
+| `POST /api/mcp` | MCP JSON-RPC |
+
+Shutdown is handled gracefully on **SIGINT** (`Ctrl+C`) or **SIGTERM**.
+
+```bash
+# Example: run in background, then stop cleanly
+./taskpilot --no-gui-with-port 9999 &
+curl http://localhost:9999/api/jobs   # → JSON list of jobs
+kill -TERM $!                         # graceful shutdown
+```
+
+### macOS LaunchAgent management
+
+Install the headless daemon as a per-user LaunchAgent so scheduled jobs continue
+outside the GUI process:
+
+```bash
+# Install and load the daemon using the configured API port
+./taskpilot --install-launch-agent
+
+# Check whether the LaunchAgent is installed/loaded
+./taskpilot --launch-agent-status
+
+# Remove the LaunchAgent
+./taskpilot --uninstall-launch-agent
+```
+
+The install command writes `~/Library/LaunchAgents/com.taskpilot.daemon.plist`
+and loads it with `launchctl`.
 
 ## Project Structure
 
@@ -98,7 +183,7 @@ The built application will be in the `build/bin` directory.
 TaskPilot follows a service-based architecture:
 
 - **JobService**: Handles database interactions for job definitions
-- **Scheduler**: Manages job execution and scheduling
+- **Scheduler**: Manages durable schedule state, misfire handling, and execution
 - **DefaultsService**: Manages default configuration settings
 - **APIServer**: REST API server for programmatic access
 - **Database**: SQLite with automatic schema migration
@@ -163,6 +248,8 @@ For complete API documentation and formal requirements, see [API_DOCUMENTATION.m
 - `on_success_cmd` (TEXT): Command to run on success
 - `last_result` (TEXT): Last execution result
 - `status` (TEXT): Current status (idle, running, failed)
+- `next_run_at` (INTEGER): Persisted next scheduled execution time
+- `last_scheduled_at` (INTEGER): Scheduled fire time for the most recently claimed run
 
 ### History Table
 - `id` (INTEGER): Auto-increment ID
@@ -170,6 +257,8 @@ For complete API documentation and formal requirements, see [API_DOCUMENTATION.m
 - `output` (TEXT): Command output
 - `exit_code` (INTEGER): Process exit code
 - `timestamp` (DATETIME): Execution time
+- `scheduled_at` (INTEGER): Scheduled fire time when applicable
+- `trigger_type` (TEXT): scheduled, manual, immediate, skipped, or event
 
 ## Testing
 

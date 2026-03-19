@@ -2,12 +2,96 @@ package services
 
 import (
 	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"taskpilot/db"
 	"taskpilot/models"
+
+	_ "modernc.org/sqlite"
 )
+
+func newSchedulerTestHarness(t *testing.T) (*sql.DB, *JobService, *Scheduler) {
+	t.Helper()
+
+	sqlDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "taskpilot.db"))
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+
+	schema := []string{
+		`CREATE TABLE jobs (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			command TEXT NOT NULL,
+			directory TEXT,
+			schedule TEXT NOT NULL,
+			sound_file TEXT,
+			on_success_cmd TEXT,
+			last_result TEXT,
+			status TEXT DEFAULT 'idle',
+			schedule_type TEXT DEFAULT 'cron',
+			paused BOOLEAN DEFAULT 0,
+			run_at INTEGER,
+			delay_minutes INTEGER,
+			last_run_at INTEGER,
+			next_run_at INTEGER,
+			last_scheduled_at INTEGER,
+			disable_macos_sleep_prevention BOOLEAN DEFAULT 0
+		)`,
+		`CREATE TABLE history (
+			id TEXT PRIMARY KEY,
+			job_id TEXT NOT NULL,
+			output TEXT,
+			exit_code INTEGER,
+			timestamp INTEGER,
+			duration_ms INTEGER,
+			scheduled_at INTEGER,
+			trigger_type TEXT
+		)`,
+		`CREATE TABLE defaults (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			working_directory TEXT,
+			sound_file TEXT,
+			on_success_cmd TEXT,
+			api_port INTEGER DEFAULT 8080
+		)`,
+	}
+
+	for _, stmt := range schema {
+		if _, err := sqlDB.Exec(stmt); err != nil {
+			t.Fatalf("apply schema: %v", err)
+		}
+	}
+
+	jobService := NewJobServiceWithDB(&db.Database{DB: sqlDB})
+	scheduler := NewScheduler(jobService)
+	jobService.SetScheduler(scheduler)
+
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	return sqlDB, jobService, scheduler
+}
+
+func insertSchedulerTestJob(t *testing.T, sqlDB *sql.DB, job models.Job) {
+	t.Helper()
+	_, err := sqlDB.Exec(
+		`INSERT INTO jobs (
+			id, name, command, directory, schedule, sound_file, on_success_cmd, last_result,
+			status, schedule_type, paused, run_at, delay_minutes, last_run_at, next_run_at,
+			last_scheduled_at, disable_macos_sleep_prevention
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, job.Name, job.Command, job.Directory, job.Schedule, job.SoundFile, job.OnSuccessCmd, job.LastResult,
+		job.Status, job.ScheduleType, job.Paused, job.RunAt, job.DelayMinutes, job.LastRunAt, job.NextRunAt,
+		job.LastScheduledAt, job.DisableMacosSleepPrevention,
+	)
+	if err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+}
 
 func TestNewScheduler(t *testing.T) {
 	mockDB := db.NewMockDB()
@@ -18,39 +102,39 @@ func TestNewScheduler(t *testing.T) {
 	if scheduler == nil {
 		t.Fatal("NewScheduler() returned nil")
 	}
-
-	if scheduler.cron == nil {
-		t.Error("Scheduler cron is nil")
-	}
-
 	if scheduler.jobService == nil {
 		t.Error("Scheduler jobService is nil")
 	}
-
-	if scheduler.entryMap == nil {
-		t.Error("Scheduler entryMap is nil")
+	if scheduler.stopTicker == nil {
+		t.Error("Scheduler stopTicker is nil")
+	}
+	if scheduler.wakeMap == nil {
+		t.Error("Scheduler wakeMap is nil")
 	}
 }
 
 func TestScheduler_ScheduleJob_ValidCron(t *testing.T) {
-	mockDB := db.NewMockDB()
-	jobService := NewJobServiceWithDB(mockDB)
-	scheduler := NewScheduler(jobService)
+	_, jobService, scheduler := newSchedulerTestHarness(t)
 
 	job := models.NewTestJob(
-		models.WithSchedule("* * * * *"), // Every minute
+		models.WithSchedule("* * * * *"),
 		models.WithScheduleType(models.ScheduleTypeCron),
 	)
+	insertSchedulerTestJob(t, jobService.db.(*db.Database).DB, job)
 
-	err := scheduler.ScheduleJob(job)
-
-	if err != nil {
-		t.Errorf("ScheduleJob() unexpected error: %v", err)
+	if err := scheduler.ScheduleJob(job); err != nil {
+		t.Fatalf("ScheduleJob() unexpected error: %v", err)
 	}
 
-	// Verify the job was added to the entry map
-	if _, exists := scheduler.entryMap[job.ID]; !exists {
-		t.Error("Job not found in entryMap after scheduling")
+	stored, err := jobService.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID() failed: %v", err)
+	}
+	if stored.NextRunAt == nil {
+		t.Fatal("expected next_run_at to be persisted")
+	}
+	if *stored.NextRunAt <= time.Now().Unix() {
+		t.Errorf("expected next_run_at in the future, got %d", *stored.NextRunAt)
 	}
 }
 
@@ -64,143 +148,126 @@ func TestScheduler_ScheduleJob_InvalidCron(t *testing.T) {
 		models.WithScheduleType(models.ScheduleTypeCron),
 	)
 
-	err := scheduler.ScheduleJob(job)
-
-	if err == nil {
+	if err := scheduler.ScheduleJob(job); err == nil {
 		t.Error("ScheduleJob() expected error for invalid cron expression, got nil")
 	}
 }
 
-func TestScheduler_ScheduleJob_ImmediateExecution(t *testing.T) {
-	t.Skip("Skipping: Immediate execution spawns goroutine that accesses db.DB directly. Requires integration test or scheduler refactoring.")
+func TestScheduler_RunJobImmediately_DoesNotAffectSchedule(t *testing.T) {
+	_, jobService, scheduler := newSchedulerTestHarness(t)
 
-	mockDB := db.NewMockDB()
-	mockDB.ExecFunc = func(query string, args ...interface{}) (sql.Result, error) {
-		return &db.MockResult{}, nil
-	}
-
-	jobService := NewJobServiceWithDB(mockDB)
-	scheduler := NewScheduler(jobService)
-
-	job := models.NewTestJob(
-		models.WithScheduleType(models.ScheduleTypeImmediate),
-		models.WithCommand("echo test"),
-	)
-
-	err := scheduler.ScheduleJob(job)
-
-	if err != nil {
-		t.Errorf("ScheduleJob() unexpected error: %v", err)
-	}
-
-	// For immediate jobs, they should not be in the entry map
-	// (they run once and are not scheduled)
-	if _, exists := scheduler.entryMap[job.ID]; exists {
-		t.Error("Immediate job should not be in entryMap")
-	}
-}
-
-func TestScheduler_RemoveJob(t *testing.T) {
-	mockDB := db.NewMockDB()
-	jobService := NewJobServiceWithDB(mockDB)
-	scheduler := NewScheduler(jobService)
-
-	// First schedule a job
+	nextRunAt := time.Now().Add(30 * time.Minute).Unix()
 	job := models.NewTestJob(
 		models.WithSchedule("* * * * *"),
 		models.WithScheduleType(models.ScheduleTypeCron),
+		models.WithCommand("printf manual"),
 	)
+	job.NextRunAt = &nextRunAt
+	insertSchedulerTestJob(t, jobService.db.(*db.Database).DB, job)
 
-	err := scheduler.ScheduleJob(job)
+	scheduler.RunJobImmediately(job)
+	time.Sleep(250 * time.Millisecond)
+
+	stored, err := jobService.GetJobByID(job.ID)
 	if err != nil {
-		t.Fatalf("ScheduleJob() failed: %v", err)
+		t.Fatalf("GetJobByID() failed: %v", err)
 	}
-
-	// Verify it's in the map
-	if _, exists := scheduler.entryMap[job.ID]; !exists {
-		t.Fatal("Job not in entryMap after scheduling")
+	if stored.NextRunAt == nil {
+		t.Fatal("expected next_run_at to remain set")
 	}
-
-	// Remove it by scheduling with empty schedule or directly from map
-	delete(scheduler.entryMap, job.ID)
-
-	// Verify it's removed from the map
-	if _, exists := scheduler.entryMap[job.ID]; exists {
-		t.Error("Job still in entryMap after removal")
+	if *stored.NextRunAt != nextRunAt {
+		t.Errorf("expected next_run_at %d, got %d", nextRunAt, *stored.NextRunAt)
+	}
+	if stored.LastResult != "success" {
+		t.Errorf("expected last_result success, got %q", stored.LastResult)
 	}
 }
 
-func TestScheduler_StartStop_Lifecycle(t *testing.T) {
-	mockDB := db.NewMockDB()
+func TestScheduler_SkipOverdueCronJob(t *testing.T) {
+	_, jobService, scheduler := newSchedulerTestHarness(t)
 
-	// Mock GetJobs to return empty list
-	mockDB.QueryFunc = func(query string, args ...interface{}) (*sql.Rows, error) {
-		return nil, nil
-	}
-
-	jobService := NewJobServiceWithDB(mockDB)
-	scheduler := NewScheduler(jobService)
-
-	// Test Stop immediately (should not panic)
-	scheduler.Stop()
-
-	// Note: Full Start() testing requires a context and would block,
-	// so we only test that Stop() works and doesn't panic
-}
-
-func TestScheduler_JobExecution_Callback(t *testing.T) {
-	// This test verifies that the execution callback mechanism works
-	mockDB := db.NewMockDB()
-
-	executionCount := 0
-	mockDB.ExecFunc = func(query string, args ...interface{}) (sql.Result, error) {
-		executionCount++
-		return &db.MockResult{}, nil
-	}
-
-	jobService := NewJobServiceWithDB(mockDB)
-	scheduler := NewScheduler(jobService)
-
-	// Create a job with very short delay for testing
+	pastDue := time.Now().Add(-3 * time.Hour).Unix()
 	job := models.NewTestJob(
-		models.WithSchedule("* * * * *"),
+		models.WithSchedule("*/5 * * * *"),
 		models.WithScheduleType(models.ScheduleTypeCron),
-		models.WithCommand("echo test"),
 	)
+	job.NextRunAt = &pastDue
+	insertSchedulerTestJob(t, jobService.db.(*db.Database).DB, job)
 
-	// Schedule the job (but don't start the scheduler to avoid actual execution)
-	err := scheduler.ScheduleJob(job)
-	if err != nil {
-		t.Fatalf("ScheduleJob() failed: %v", err)
+	if err := scheduler.processDueJobs(time.Now()); err != nil {
+		t.Fatalf("processDueJobs() failed: %v", err)
 	}
 
-	// In a real test with execution, we'd wait for the callback
-	// For this unit test, we just verify the job was scheduled
-	if _, exists := scheduler.entryMap[job.ID]; !exists {
-		t.Error("Job not scheduled")
+	stored, err := jobService.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID() failed: %v", err)
+	}
+	if stored.LastResult != "missed" {
+		t.Errorf("expected last_result missed, got %q", stored.LastResult)
+	}
+	if stored.NextRunAt == nil || *stored.NextRunAt <= time.Now().Unix() {
+		t.Fatalf("expected future next_run_at after skip, got %+v", stored.NextRunAt)
+	}
+
+	history, err := jobService.GetJobHistory(job.ID, 10)
+	if err != nil {
+		t.Fatalf("GetJobHistory() failed: %v", err)
+	}
+	if len(history) == 0 {
+		t.Fatal("expected skip history entry")
+	}
+	if history[0].TriggerType != triggerTypeSkipped {
+		t.Errorf("expected trigger_type %q, got %q", triggerTypeSkipped, history[0].TriggerType)
+	}
+	if history[0].ScheduledAt == nil || *history[0].ScheduledAt != pastDue {
+		t.Errorf("expected scheduled_at %d, got %+v", pastDue, history[0].ScheduledAt)
 	}
 }
 
-func TestScheduler_OneTimeJob_Scheduling(t *testing.T) {
-	mockDB := db.NewMockDB()
-	jobService := NewJobServiceWithDB(mockDB)
-	scheduler := NewScheduler(jobService)
+func TestScheduler_RunDueOneTimeJobPausesAfterExecution(t *testing.T) {
+	_, jobService, scheduler := newSchedulerTestHarness(t)
 
-	runAt := time.Now().Add(1 * time.Hour).Unix()
+	runAt := time.Now().Add(-30 * time.Second).Unix()
 	job := models.NewTestJob(
 		models.WithScheduleType(models.ScheduleTypeDatetime),
 		models.WithRunAt(runAt),
+		models.WithCommand("printf one-time"),
 	)
+	job.NextRunAt = &runAt
+	insertSchedulerTestJob(t, jobService.db.(*db.Database).DB, job)
 
-	err := scheduler.ScheduleJob(job)
-
-	if err != nil {
-		t.Errorf("ScheduleJob() unexpected error: %v", err)
+	if err := scheduler.processDueJobs(time.Now()); err != nil {
+		t.Fatalf("processDueJobs() failed: %v", err)
 	}
 
-	// One-time jobs are not added to entryMap (they're handled by ticker)
-	if _, exists := scheduler.entryMap[job.ID]; exists {
-		t.Error("One-time job should not be in entryMap")
+	time.Sleep(250 * time.Millisecond)
+
+	stored, err := jobService.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID() failed: %v", err)
+	}
+	if !stored.Paused {
+		t.Error("expected one-time job to be paused after execution")
+	}
+	if stored.Status != "idle" {
+		t.Errorf("expected status idle, got %q", stored.Status)
+	}
+	if stored.LastResult != "success" {
+		t.Errorf("expected last_result success, got %q", stored.LastResult)
+	}
+	if stored.NextRunAt != nil {
+		t.Errorf("expected next_run_at cleared, got %+v", stored.NextRunAt)
+	}
+
+	history, err := jobService.GetJobHistory(job.ID, 10)
+	if err != nil {
+		t.Fatalf("GetJobHistory() failed: %v", err)
+	}
+	if len(history) == 0 {
+		t.Fatal("expected execution history entry")
+	}
+	if history[0].TriggerType != triggerTypeScheduled {
+		t.Errorf("expected trigger_type %q, got %q", triggerTypeScheduled, history[0].TriggerType)
 	}
 }
 
@@ -212,233 +279,74 @@ func TestGenerateHistoryID(t *testing.T) {
 	if id1 == "" {
 		t.Error("generateHistoryID() should not return empty string")
 	}
-
 	if id1 == id2 {
 		t.Error("generateHistoryID() should generate unique IDs")
 	}
 }
 
-func TestNewScheduler_Initialization(t *testing.T) {
-	mockDB := db.NewMockDB()
-	jobService := NewJobServiceWithDB(mockDB)
-	scheduler := NewScheduler(jobService)
-
-	if scheduler.cron == nil {
-		t.Error("Scheduler.cron should not be nil")
-	}
-
-	if scheduler.jobService != jobService {
-		t.Error("Scheduler.jobService should be set")
-	}
-
-	if scheduler.entryMap == nil {
-		t.Error("Scheduler.entryMap should be initialized")
-	}
-
-	if len(scheduler.entryMap) != 0 {
-		t.Error("Scheduler.entryMap should start empty")
-	}
-
-	if scheduler.stopTicker == nil {
-		t.Error("Scheduler.stopTicker should be initialized")
+func TestWrapWithCaffeinate_NonDarwin(t *testing.T) {
+	original := "echo hello"
+	result := wrapWithCaffeinate_forTest(original, false, "linux")
+	if result != original {
+		t.Errorf("expected original command on linux, got: %s", result)
 	}
 }
 
-func TestScheduler_RunJobImmediately(t *testing.T) {
-	mockDB := db.NewMockDB()
-
-	updateCalled := false
-	mockDB.ExecFunc = func(query string, args ...interface{}) (sql.Result, error) {
-		updateCalled = true
-		return &db.MockResult{}, nil
-	}
-
-	jobService := NewJobServiceWithDB(mockDB)
-	scheduler := NewScheduler(jobService)
-
-	job := models.NewTestJob(
-		models.WithCommand("echo test"),
-		models.WithTitle("Test Trigger Job"),
-	)
-
-	// Call RunJobImmediately - it should not panic
-	scheduler.RunJobImmediately(job)
-
-	// Give the goroutine a moment to start
-	time.Sleep(50 * time.Millisecond)
-
-	// The method should have been called without error
-	// We expect updateCalled to be true since runJob updates the job status
-	if !updateCalled {
-		t.Error("Expected job update to be called during execution")
+func TestWrapWithCaffeinate_DisabledFlag(t *testing.T) {
+	original := "echo hello"
+	result := wrapWithCaffeinate_forTest(original, true, "darwin")
+	if result != original {
+		t.Errorf("expected original command when disabled, got: %s", result)
 	}
 }
 
-func TestScheduler_RunJobImmediately_DoesNotAffectSchedule(t *testing.T) {
-	mockDB := db.NewMockDB()
-	mockDB.ExecFunc = func(query string, args ...interface{}) (sql.Result, error) {
-		return &db.MockResult{}, nil
+func TestWrapWithCaffeinate_Darwin(t *testing.T) {
+	original := "echo hello"
+	result := wrapWithCaffeinate_forTest(original, false, "darwin")
+	expected := "caffeinate -s -- sh -c 'echo hello'"
+	if result != expected {
+		t.Errorf("expected caffeinate-wrapped command, got: %s", result)
 	}
+}
 
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"echo hello", "'echo hello'"},
+		{"it's a test", "'it'\\''s a test'"},
+		{"simple", "'simple'"},
+	}
+	for _, tt := range tests {
+		got := shellQuote(tt.input)
+		if got != tt.expected {
+			t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestScheduler_DisableMacosSleepPrevention_NoWakeEvent(t *testing.T) {
+	mockDB := db.NewMockDB()
 	jobService := NewJobServiceWithDB(mockDB)
 	scheduler := NewScheduler(jobService)
 
-	// Schedule a cron job
 	job := models.NewTestJob(
 		models.WithSchedule("* * * * *"),
 		models.WithScheduleType(models.ScheduleTypeCron),
 	)
+	job.DisableMacosSleepPrevention = true
 
-	err := scheduler.ScheduleJob(job)
-	if err != nil {
-		t.Fatalf("ScheduleJob() failed: %v", err)
-	}
+	scheduler.registerWakeEvent(job, time.Now().Add(10*time.Minute))
 
-	// Verify it's in the schedule
-	if _, exists := scheduler.entryMap[job.ID]; !exists {
-		t.Fatal("Job not scheduled")
-	}
-
-	// Trigger it immediately
-	scheduler.RunJobImmediately(job)
-
-	// Verify it's still in the schedule
-	if _, exists := scheduler.entryMap[job.ID]; !exists {
-		t.Error("Job should still be scheduled after immediate trigger")
+	if _, exists := scheduler.wakeMap[job.ID]; exists {
+		t.Error("wakeMap should not contain entry for job with DisableMacosSleepPrevention=true")
 	}
 }
 
-func TestScheduler_OneTimeJob_NoDuplicateExecution(t *testing.T) {
-	// This test verifies that the race condition fix prevents
-	// one-time jobs from being triggered multiple times
-	mockDB := db.NewMockDB()
-
-	statusUpdates := []string{}
-
-	mockDB.QueryFunc = func(query string, args ...interface{}) (*sql.Rows, error) {
-		// Return empty result for GetJobs
-		return nil, nil
-	}
-
-	mockDB.ExecFunc = func(query string, args ...interface{}) (sql.Result, error) {
-		// Track status updates - status is argument 7 for UPDATE queries
-		if len(args) > 7 {
-			if status, ok := args[7].(string); ok {
-				statusUpdates = append(statusUpdates, status)
-			}
-		}
-		return &db.MockResult{}, nil
-	}
-
-	jobService := NewJobServiceWithDB(mockDB)
-	scheduler := NewScheduler(jobService)
-	_ = scheduler // Scheduler is used in context
-
-	// Create a one-time job that should run now
-	runAt := time.Now().Add(-1 * time.Second).Unix() // In the past
-	job := models.NewTestJob(
-		models.WithScheduleType(models.ScheduleTypeDatetime),
-		models.WithRunAt(runAt),
-		models.WithCommand("echo test"),
-		models.WithStatus("idle"),
-	)
-
-	// Simulate the checkOneTimeJobs logic
-	// First call should update status to "running"
-	job.Status = "running"
-	_, err := jobService.UpdateJob(job)
-	if err != nil {
-		// Expected to fail since job doesn't exist in DB, but the status update was attempted
-		t.Logf("Update returned error (expected): %v", err)
-	}
-
-	// Verify status update was attempted with "running"
-	if len(statusUpdates) > 0 && statusUpdates[0] == "running" {
-		t.Log("Status correctly updated to 'running' before execution")
-	} else {
-		t.Errorf("Expected status to be updated to 'running', got updates: %v", statusUpdates)
-	}
-
-	// The important thing is that the status is set to "running" immediately
-	// This prevents the next tick from re-triggering the same job
-	if job.Status != "running" {
-		t.Errorf("Job status should be 'running' after update attempt, got '%s'", job.Status)
-	}
-}
-
-// --- macOS sleep prevention tests (tasks 6.1–6.4) ---
-
-func TestWrapWithCaffeinate_NonDarwin(t *testing.T) {
-// On non-darwin, should always return original command
-original := "echo hello"
-result := wrapWithCaffeinate_forTest(original, false, "linux")
-if result != original {
-t.Errorf("expected original command on linux, got: %s", result)
-}
-}
-
-func TestWrapWithCaffeinate_DisabledFlag(t *testing.T) {
-// When disabled=true, should return original command regardless of OS
-original := "echo hello"
-result := wrapWithCaffeinate_forTest(original, true, "darwin")
-if result != original {
-t.Errorf("expected original command when disabled, got: %s", result)
-}
-}
-
-func TestWrapWithCaffeinate_Darwin(t *testing.T) {
-// On darwin with disabled=false, should wrap with caffeinate
-original := "echo hello"
-result := wrapWithCaffeinate_forTest(original, false, "darwin")
-expected := "caffeinate -s -- sh -c 'echo hello'"
-if result != expected {
-t.Errorf("expected caffeinate-wrapped command, got: %s", result)
-}
-}
-
-func TestShellQuote(t *testing.T) {
-tests := []struct {
-input    string
-expected string
-}{
-{"echo hello", "'echo hello'"},
-{"it's a test", "'it'\\''s a test'"},
-{"simple", "'simple'"},
-}
-for _, tt := range tests {
-got := shellQuote(tt.input)
-if got != tt.expected {
-t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.expected)
-}
-}
-}
-
-func TestScheduler_DisableMacosSleepPrevention_NoWakeEvent(t *testing.T) {
-// Integration test: job with opt-out flag should not register wake event
-mockDB := db.NewMockDB()
-jobService := NewJobServiceWithDB(mockDB)
-scheduler := NewScheduler(jobService)
-
-job := models.NewTestJob(
-models.WithSchedule("* * * * *"),
-models.WithScheduleType(models.ScheduleTypeCron),
-)
-job.DisableMacosSleepPrevention = true
-
-// Register should be a no-op for opted-out job
-futureTime := time.Now().Add(10 * time.Minute)
-scheduler.registerWakeEvent(job, futureTime)
-
-if _, exists := scheduler.wakeMap[job.ID]; exists {
-t.Error("wakeMap should not contain entry for job with DisableMacosSleepPrevention=true")
-}
-}
-
-// wrapWithCaffeinate_forTest allows injecting OS for testing without build tags.
 func wrapWithCaffeinate_forTest(cmd string, disabled bool, goos string) string {
-if disabled || goos != "darwin" {
-return cmd
-}
-// On darwin path: check caffeinate available (will be true on macOS CI, skip on others)
-return "caffeinate -s -- sh -c " + shellQuote(cmd)
+	if disabled || goos != "darwin" {
+		return cmd
+	}
+	return "caffeinate -s -- sh -c " + shellQuote(cmd)
 }

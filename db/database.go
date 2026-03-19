@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // DatabaseInterface defines the database operations needed by services
@@ -58,7 +58,7 @@ func Initialize() error {
 	dbPath := filepath.Join(appDir, "taskpilot.db")
 	log.Printf("Database path: %s", dbPath)
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
 	}
@@ -82,7 +82,10 @@ func migrate() error {
 		paused BOOLEAN DEFAULT 0,
 		run_at INTEGER,
 		delay_minutes INTEGER,
-		last_run_at INTEGER
+		last_run_at INTEGER,
+		next_run_at INTEGER,
+		last_scheduled_at INTEGER,
+		disable_macos_sleep_prevention BOOLEAN DEFAULT 0
 	)`
 
 	if _, err := DB.Exec(jobsTable); err != nil {
@@ -96,6 +99,8 @@ func migrate() error {
 		exit_code INTEGER,
 		timestamp INTEGER,
 		duration_ms INTEGER,
+		scheduled_at INTEGER,
+		trigger_type TEXT,
 		FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
 	)`
 
@@ -105,6 +110,8 @@ func migrate() error {
 
 	// Add duration_ms column if it doesn't exist (for existing databases)
 	_, _ = DB.Exec(`ALTER TABLE history ADD COLUMN duration_ms INTEGER`)
+	_, _ = DB.Exec(`ALTER TABLE history ADD COLUMN scheduled_at INTEGER`)
+	_, _ = DB.Exec(`ALTER TABLE history ADD COLUMN trigger_type TEXT`)
 
 	// Migration for new scheduling columns
 	_, _ = DB.Exec(`ALTER TABLE jobs ADD COLUMN schedule_type TEXT DEFAULT 'cron'`)
@@ -117,9 +124,14 @@ func migrate() error {
 
 	// Add last_run_at column for tracking last execution time
 	_, _ = DB.Exec(`ALTER TABLE jobs ADD COLUMN last_run_at INTEGER`)
+	_, _ = DB.Exec(`ALTER TABLE jobs ADD COLUMN next_run_at INTEGER`)
+	_, _ = DB.Exec(`ALTER TABLE jobs ADD COLUMN last_scheduled_at INTEGER`)
 
 	// Add disable_macos_sleep_prevention column for per-job opt-out of macOS sleep prevention
 	_, _ = DB.Exec(`ALTER TABLE jobs ADD COLUMN disable_macos_sleep_prevention BOOLEAN DEFAULT 0`)
+
+	_, _ = DB.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_next_run_at ON jobs(next_run_at)`)
+	_, _ = DB.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_active_next_run_at ON jobs(paused, next_run_at)`)
 
 	// Backfill last_run_at from history table for existing jobs
 	_, _ = DB.Exec(`

@@ -26,6 +26,7 @@ func NewTestJob(opts ...TestJobOption) Job {
 		RunAt:        nil,
 		DelayMinutes: nil,
 		LastRunAt:    nil,
+		NextRunAt:    nil,
 	}
 
 	for _, opt := range opts {
@@ -118,12 +119,13 @@ func NewTestDefaults() Defaults {
 // NewTestHistory creates a History record for testing
 func NewTestHistory(jobID string) History {
 	return History{
-		ID:         uuid.New().String(),
-		JobID:      jobID,
-		Output:     "Test output",
-		ExitCode:   0,
-		Timestamp:  time.Now().Unix(),
-		DurationMs: 1000,
+		ID:          uuid.New().String(),
+		JobID:       jobID,
+		Output:      "Test output",
+		ExitCode:    0,
+		Timestamp:   time.Now().Unix(),
+		DurationMs:  1000,
+		TriggerType: "scheduled",
 	}
 }
 

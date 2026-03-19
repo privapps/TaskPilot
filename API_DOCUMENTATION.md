@@ -290,7 +290,54 @@ if response.status_code == 200:
     print(f"UTC offset: {time_info['timezone_offset']} ({time_info['utc_offset_seconds']} seconds)")
 ```
 
-## Error Responses
+---
+
+#### List Available Timezones
+```http
+GET /api/system/timezones
+```
+
+Returns the server's current IANA timezone and a sorted list of all well-known IANA timezone names. Useful for populating timezone pickers and converting job execution times to a user's local timezone.
+
+**Response:** HTTP 200
+```json
+{
+  "current": "America/Los_Angeles",
+  "timezones": [
+    "Africa/Abidjan",
+    "Africa/Accra",
+    "...300+ more...",
+    "America/Los_Angeles",
+    "America/New_York",
+    "Asia/Tokyo",
+    "Europe/London",
+    "UTC"
+  ]
+}
+```
+
+**Response Fields:**
+- `current` - IANA name of the server's local timezone (same as `timezone` in `/api/system/time`)
+- `timezones` - Sorted list of all well-known IANA timezone names from the embedded IANA database
+
+**Use Cases:**
+- Populate timezone selection dropdowns in a frontend UI
+- Validate a timezone string before saving a job
+- Display job execution times in a user-chosen timezone
+
+**Examples:**
+```bash
+# List all available timezones
+curl http://localhost:8080/api/system/timezones
+
+# Get just the server's current timezone
+curl -s http://localhost:8080/api/system/timezones | jq .current
+
+# Check if a timezone is valid
+curl -s http://localhost:8080/api/system/timezones | jq '.timezones | map(select(. == "Asia/Tokyo")) | length'
+```
+
+
 
 All error responses follow this format:
 

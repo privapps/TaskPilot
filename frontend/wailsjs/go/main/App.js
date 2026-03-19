@@ -14,6 +14,10 @@ export function GetDefaults() {
   return window['go']['main']['App']['GetDefaults']();
 }
 
+export function GetLaunchAgentStatus() {
+  return window['go']['main']['App']['GetLaunchAgentStatus']();
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
@@ -26,12 +30,20 @@ export function ImportJobsWithDialog() {
   return window['go']['main']['App']['ImportJobsWithDialog']();
 }
 
+export function InstallLaunchAgent() {
+  return window['go']['main']['App']['InstallLaunchAgent']();
+}
+
 export function PrepareImportWithDialog() {
   return window['go']['main']['App']['PrepareImportWithDialog']();
 }
 
 export function TriggerJob(arg1) {
   return window['go']['main']['App']['TriggerJob'](arg1);
+}
+
+export function UninstallLaunchAgent() {
+  return window['go']['main']['App']['UninstallLaunchAgent']();
 }
 
 export function UpdateDefaults(arg1) {

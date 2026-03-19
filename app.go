@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"taskpilot/models"
 	"taskpilot/services"
@@ -44,18 +45,19 @@ func NewApp(scheduler *services.Scheduler, jobService *services.JobService) *App
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
-	// Start the scheduler in a goroutine
-	go func() {
-		if err := a.scheduler.Start(ctx); err != nil {
-			// Log error but don't crash the app
-		}
-	}()
+	if runEmbedded, err := services.ShouldRunEmbeddedScheduler(); err != nil {
+		log.Printf("LaunchAgent status unavailable, starting embedded scheduler: %v", err)
+		go a.startEmbeddedScheduler(ctx)
+	} else if runEmbedded {
+		go a.startEmbeddedScheduler(ctx)
+	} else {
+		log.Printf("LaunchAgent is active; GUI will not start a second scheduler")
+	}
 
 	// Start the API server in a goroutine
 	go func() {
 		if err := a.apiServer.Start(ctx); err != nil {
-			// Log error but don't crash the app
-			// Application continues without API server if port is in use
+			log.Printf("API server error: %v", err)
 		}
 	}()
 
@@ -64,9 +66,15 @@ func (a *App) startup(ctx context.Context) {
 		<-ctx.Done()
 		shutdownCtx := context.Background()
 		if err := a.apiServer.Shutdown(shutdownCtx); err != nil {
-			// Log error but application is already shutting down
+			log.Printf("API server shutdown error: %v", err)
 		}
 	}()
+}
+
+func (a *App) startEmbeddedScheduler(ctx context.Context) {
+	if err := a.scheduler.Start(ctx); err != nil {
+		log.Printf("Embedded scheduler error: %v", err)
+	}
 }
 
 // Greet returns a greeting for the given name
@@ -192,4 +200,37 @@ func (a *App) CheckImportFileHasDefaults(filepath string) (bool, error) {
 // TriggerJob triggers a job to run immediately
 func (a *App) TriggerJob(jobID string) error {
 	return a.jobService.TriggerJob(jobID)
+}
+
+// InstallLaunchAgent installs the macOS LaunchAgent for the headless daemon.
+func (a *App) InstallLaunchAgent() (*services.LaunchAgentStatus, error) {
+	defaults, err := a.defaultsService.GetDefaults()
+	if err != nil {
+		return nil, err
+	}
+
+	port := 8080
+	if defaults != nil && defaults.APIPort > 0 {
+		port = defaults.APIPort
+	}
+
+	status, err := services.InstallLaunchAgent(port)
+	if err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
+// UninstallLaunchAgent removes the macOS LaunchAgent for the headless daemon.
+func (a *App) UninstallLaunchAgent() error {
+	return services.UninstallLaunchAgent()
+}
+
+// GetLaunchAgentStatus reports the macOS LaunchAgent status for the headless daemon.
+func (a *App) GetLaunchAgentStatus() (*services.LaunchAgentStatus, error) {
+	status, err := services.GetLaunchAgentStatus()
+	if err != nil {
+		return nil, err
+	}
+	return &status, nil
 }

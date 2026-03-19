@@ -9,242 +9,419 @@ import (
 	"runtime"
 	"time"
 
-	"taskpilot/db"
 	"taskpilot/models"
 
 	"github.com/robfig/cron/v3"
 )
 
-// MacOSWakeLeadTime is how far before a scheduled cron fire time we wake the Mac.
-const MacOSWakeLeadTime = 2 * time.Minute
+const (
+	// MacOSWakeLeadTime is how far before a scheduled fire time we wake the Mac.
+	MacOSWakeLeadTime = 2 * time.Minute
+
+	schedulerPollInterval = 5 * time.Second
+	cronMisfireGrace      = 10 * time.Minute
+	oneTimeMisfireGrace   = 5 * time.Minute
+	skippedJobExitCode    = -2
+
+	triggerTypeEvent     = "event"
+	triggerTypeImmediate = "immediate"
+	triggerTypeManual    = "manual"
+	triggerTypeRecovery  = "recovery"
+	triggerTypeScheduled = "scheduled"
+	triggerTypeSkipped   = "skipped"
+)
 
 type Scheduler struct {
-	cron       *cron.Cron
+	parser     cron.Parser
 	jobService *JobService
-	entryMap   map[string]cron.EntryID // maps job ID to cron entry ID
-	stopTicker chan bool               // channel to stop the one-time job ticker
-	wakeMap    map[string]time.Time   // maps job ID to registered pmset wake time
+	stopTicker chan bool
+	wakeMap    map[string]time.Time // maps job ID to registered pmset wake time
 }
 
 func NewScheduler(jobService *JobService) *Scheduler {
 	return &Scheduler{
-		cron:       cron.New(),
+		parser:     cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor),
 		jobService: jobService,
-		entryMap:   make(map[string]cron.EntryID),
-		stopTicker: make(chan bool),
+		stopTicker: make(chan bool, 1),
 		wakeMap:    make(map[string]time.Time),
 	}
 }
 
 func (s *Scheduler) Start(ctx context.Context) error {
-	// Load all jobs and schedule them
-	jobs, err := s.jobService.GetJobs()
-	if err != nil {
-		return fmt.Errorf("failed to load jobs: %w", err)
+	log.Println("Scheduler started (durable DB mode)")
+
+	if err := s.recoverInterruptedJobs(); err != nil {
+		return fmt.Errorf("failed to recover interrupted jobs: %w", err)
+	}
+	if err := s.reconcileAllJobs(); err != nil {
+		return fmt.Errorf("failed to reconcile job schedules: %w", err)
+	}
+	if err := s.processDueJobs(time.Now()); err != nil {
+		return fmt.Errorf("failed to process due jobs: %w", err)
 	}
 
-	for _, job := range jobs {
-		// Skip paused jobs
-		if job.Paused {
-			log.Printf("Skipping paused job: %s", job.Name)
-			continue
-		}
+	ticker := time.NewTicker(schedulerPollInterval)
+	defer ticker.Stop()
 
-		if err := s.ScheduleJob(job); err != nil {
-			log.Printf("Failed to schedule job %s: %v", job.Name, err)
-		}
-	}
-
-	s.cron.Start()
-	log.Println("Scheduler started")
-
-	// Register macOS wake events for all scheduled cron jobs (task 4.1)
-	for jobID, entryID := range s.entryMap {
-		entry := s.cron.Entry(entryID)
-		if !entry.Next.IsZero() {
-			// Find the job to check opt-out flag
-			jobs, err := s.jobService.GetJobs()
-			if err == nil {
-				for _, j := range jobs {
-					if j.ID == jobID {
-						s.registerWakeEvent(j, entry.Next)
-						break
-					}
-				}
+	for {
+		select {
+		case <-ticker.C:
+			if err := s.reconcileAllJobs(); err != nil {
+				log.Printf("Failed to reconcile job schedules: %v", err)
 			}
+			if err := s.processDueJobs(time.Now()); err != nil {
+				log.Printf("Failed to process due jobs: %v", err)
+			}
+		case <-s.stopTicker:
+			log.Println("Scheduler stopped")
+			return nil
+		case <-ctx.Done():
+			log.Println("Scheduler stopped")
+			return nil
 		}
 	}
-
-	// Start ticker for checking one-time jobs
-	go s.checkOneTimeJobs(ctx)
-
-	// Keep running until context is cancelled
-	<-ctx.Done()
-	s.Stop()
-	return nil
 }
 
 func (s *Scheduler) Stop() {
-	// Non-blocking send to stopTicker (in case Start was never called)
 	select {
 	case s.stopTicker <- true:
 	default:
 	}
-
-	ctx := s.cron.Stop()
-	<-ctx.Done()
-	log.Println("Scheduler stopped")
 }
 
 func (s *Scheduler) ScheduleJob(job models.Job) error {
-	// Remove existing schedule if any
-	if entryID, exists := s.entryMap[job.ID]; exists {
-		s.cron.Remove(entryID)
-		delete(s.entryMap, job.ID)
+	s.cancelWakeEvent(job.ID)
+
+	if job.Paused {
+		return s.persistNextRun(job.ID, nil)
 	}
 
-	// For immediate execution, run once in a goroutine
 	if job.ScheduleType == models.ScheduleTypeImmediate {
 		log.Printf("Executing immediate job: %s", job.Name)
 		go s.runImmediateJob(job)
 		return nil
 	}
 
-	// For one-time jobs (delay or datetime), don't use cron - rely on ticker
-	if job.ScheduleType == models.ScheduleTypeDelay || job.ScheduleType == models.ScheduleTypeDatetime {
-		log.Printf("Scheduled one-time job: %s to run at %v", job.Name, job.RunAt)
-		return nil
-	}
-
-	// For cron jobs, use the cron scheduler.
-	// entryID is declared before AddFunc so the closure can capture it by reference
-	// and read it at fire time (by which point AddFunc has returned and assigned it).
-	var entryID cron.EntryID
-	entryID, err := s.cron.AddFunc(job.Schedule, func() {
-		// Detect if the system was sleeping and caused the cron to fire late.
-		// entry.Prev is set to the scheduled fire time by the cron library before
-		// starting this goroutine, so it reflects when the job *should* have started.
-		if entry := s.cron.Entry(entryID); !entry.Prev.IsZero() {
-			if delay := time.Since(entry.Prev); delay > 2*time.Minute {
-				log.Printf("WARNING: Job '%s' fired %v late (scheduled: %v, actual: %v). System may have been sleeping.",
-					job.Name, delay.Round(time.Second),
-					entry.Prev.Format("15:04:05"), time.Now().Format("15:04:05"))
-			}
-		}
-		s.runJob(job)
-	})
+	nextRunAt, err := s.calculateNextRun(job, time.Now())
 	if err != nil {
-		return fmt.Errorf("failed to schedule job: %w", err)
+		return err
 	}
 
-	s.entryMap[job.ID] = entryID
-	// Register macOS wake event for the first scheduled fire time (task 3.5)
-	if entry := s.cron.Entry(entryID); !entry.Next.IsZero() {
-		s.registerWakeEvent(job, entry.Next)
+	if err := s.persistNextRun(job.ID, nextRunAt); err != nil {
+		return err
 	}
-	log.Printf("Scheduled cron job: %s with schedule: %s", job.Name, job.Schedule)
+
+	if nextRunAt != nil {
+		s.registerWakeEvent(job, time.Unix(*nextRunAt, 0))
+		log.Printf("Scheduled durable job: %s to run at %s", job.Name, time.Unix(*nextRunAt, 0).Format(time.RFC3339))
+	} else {
+		log.Printf("Cleared next run for job: %s", job.Name)
+	}
+
 	return nil
 }
 
 func (s *Scheduler) UnscheduleJob(jobID string) {
-	s.cancelWakeEvent(jobID) // cancel any pending macOS wake event (task 3.6)
-	if entryID, exists := s.entryMap[jobID]; exists {
-		s.cron.Remove(entryID)
-		delete(s.entryMap, jobID)
-		log.Printf("Unscheduled job: %s", jobID)
+	s.cancelWakeEvent(jobID)
+	if err := s.persistNextRun(jobID, nil); err != nil {
+		log.Printf("Failed to unschedule job %s: %v", jobID, err)
+		return
 	}
+	log.Printf("Unscheduled job: %s", jobID)
 }
 
-// RunJobImmediately triggers a job to execute immediately without affecting its schedule
-// This bypasses the paused check since it's an explicit user action
+// RunJobImmediately triggers a job to execute immediately without affecting its schedule.
+// This bypasses the paused check since it's an explicit user action.
 func (s *Scheduler) RunJobImmediately(job models.Job) {
 	log.Printf("Triggering immediate execution of job: %s", job.Name)
-	go s.runJobImmediate(job)
+	go s.runJobInternal(job, nil, triggerTypeManual, false, false)
 }
 
-// checkOneTimeJobs checks for one-time jobs that need to be executed
-func (s *Scheduler) checkOneTimeJobs(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+func (s *Scheduler) reconcileAllJobs() error {
+	jobs, err := s.jobService.GetJobs()
+	if err != nil {
+		return err
+	}
 
-	log.Printf("Starting one-time job checker")
-
-	for {
-		select {
-		case <-ticker.C:
-			jobs, err := s.jobService.GetJobs()
-			if err != nil {
-				log.Printf("Failed to load jobs for one-time check: %v", err)
-				continue
-			}
-
-			now := time.Now().Unix()
-			log.Printf("Checking one-time jobs. Current time: %d", now)
-
-			for _, job := range jobs {
-				// Skip paused jobs
-				if job.Paused {
-					continue
-				}
-
-				// Log all one-time jobs for debugging
-				if job.ScheduleType == models.ScheduleTypeDelay || job.ScheduleType == models.ScheduleTypeDatetime {
-					runAtStr := "nil"
-					if job.RunAt != nil {
-						runAtStr = fmt.Sprintf("%d (in %d seconds)", *job.RunAt, *job.RunAt-now)
-					}
-					log.Printf("One-time job '%s': type=%s, run_at=%s, status=%s, paused=%v",
-						job.Name, job.ScheduleType, runAtStr, job.Status, job.Paused)
-				}
-
-				// Check if this is a one-time job that should run now
-				if (job.ScheduleType == models.ScheduleTypeDelay || job.ScheduleType == models.ScheduleTypeDatetime) &&
-					job.RunAt != nil && *job.RunAt <= now && job.Status != "running" {
-
-					// Skip stale jobs: scheduled more than 5 minutes ago and never ran.
-					// A 5-minute window tolerates brief app restarts; anything older is
-					// considered missed and should not be retroactively executed.
-					if now-*job.RunAt > 5*60 && job.LastRunAt == nil {
-						log.Printf("Skipping stale one-time job '%s': scheduled %ds ago, never ran", job.Name, now-*job.RunAt)
-						continue
-					}
-
-					log.Printf("Triggering one-time job: %s (run_at=%d, now=%d)", job.Name, *job.RunAt, now)
-
-					// Update status to "running" immediately to prevent duplicate triggers
-					job.Status = "running"
-					if _, err := s.jobService.updateJob(job, false); err != nil {
-						log.Printf("Failed to update job status before execution: %v", err)
-						continue
-					}
-
-					go s.runJob(job)
+	for _, job := range jobs {
+		if job.Paused || job.ScheduleType == models.ScheduleTypeImmediate {
+			if job.NextRunAt != nil {
+				if err := s.persistNextRun(job.ID, nil); err != nil {
+					log.Printf("Failed to clear next run for paused/immediate job %s: %v", job.Name, err)
 				}
 			}
-		case <-s.stopTicker:
-			return
-		case <-ctx.Done():
-			return
+			s.cancelWakeEvent(job.ID)
+			continue
 		}
+
+		if job.NextRunAt == nil {
+			if err := s.ScheduleJob(job); err != nil {
+				log.Printf("Failed to reconcile schedule for job %s: %v", job.Name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *Scheduler) recoverInterruptedJobs() error {
+	jobs, err := s.jobService.GetJobs()
+	if err != nil {
+		return err
+	}
+
+	for _, job := range jobs {
+		if job.Status != "running" {
+			continue
+		}
+
+		job.Status = "idle"
+		job.LastResult = "interrupted"
+		if _, err := s.jobService.updateJob(job, false); err != nil {
+			log.Printf("Failed to recover interrupted job %s: %v", job.Name, err)
+			continue
+		}
+
+		message := "Recovered interrupted job after scheduler restart"
+		s.createHistory(job.ID, message, -1, time.Now(), 0, job.LastScheduledAt, triggerTypeRecovery)
+		log.Printf("Recovered interrupted job: %s", job.Name)
+	}
+
+	return nil
+}
+
+func (s *Scheduler) processDueJobs(now time.Time) error {
+	jobs, err := s.jobService.GetJobs()
+	if err != nil {
+		return err
+	}
+
+	nowUnix := now.Unix()
+	for _, job := range jobs {
+		if job.Paused || job.NextRunAt == nil || *job.NextRunAt > nowUnix || job.ScheduleType == models.ScheduleTypeImmediate {
+			continue
+		}
+
+		scheduledAt := *job.NextRunAt
+		if skip, reason := s.shouldSkipLateExecution(job, scheduledAt, now); skip {
+			if err := s.skipDueJob(job, scheduledAt, now, reason); err != nil {
+				log.Printf("Failed to skip overdue job %s: %v", job.Name, err)
+			}
+			continue
+		}
+
+		nextRunAt, err := s.calculateFollowingRun(job, scheduledAt)
+		if err != nil {
+			log.Printf("Failed to calculate next run for job %s: %v", job.Name, err)
+			continue
+		}
+
+		pauseOnClaim := job.ScheduleType == models.ScheduleTypeDelay || job.ScheduleType == models.ScheduleTypeDatetime
+		claimed, err := s.claimScheduledExecution(job, scheduledAt, nextRunAt, pauseOnClaim)
+		if err != nil {
+			log.Printf("Failed to claim job %s: %v", job.Name, err)
+			continue
+		}
+		if !claimed {
+			continue
+		}
+
+		job.Status = "running"
+		job.NextRunAt = nextRunAt
+		job.LastScheduledAt = int64Ptr(scheduledAt)
+		if pauseOnClaim {
+			job.Paused = true
+		}
+
+		go s.runScheduledJob(job, scheduledAt)
+	}
+
+	return nil
+}
+
+func (s *Scheduler) calculateNextRun(job models.Job, now time.Time) (*int64, error) {
+	switch job.ScheduleType {
+	case models.ScheduleTypeCron, "":
+		schedule, err := s.parser.Parse(job.Schedule)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse cron schedule: %w", err)
+		}
+		next := schedule.Next(now)
+		if next.IsZero() {
+			return nil, nil
+		}
+		return int64Ptr(next.Unix()), nil
+	case models.ScheduleTypeDelay, models.ScheduleTypeDatetime:
+		if job.RunAt == nil {
+			return nil, fmt.Errorf("one-time job %s is missing run_at", job.Name)
+		}
+		return int64Ptr(*job.RunAt), nil
+	case models.ScheduleTypeImmediate:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("unsupported schedule type: %s", job.ScheduleType)
 	}
 }
 
-func (s *Scheduler) runJob(job models.Job) {
-	// Prevent execution of paused jobs
-	if job.Paused {
+func (s *Scheduler) calculateFollowingRun(job models.Job, scheduledAt int64) (*int64, error) {
+	if job.ScheduleType != models.ScheduleTypeCron && job.ScheduleType != "" {
+		return nil, nil
+	}
+
+	schedule, err := s.parser.Parse(job.Schedule)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse cron schedule: %w", err)
+	}
+	next := schedule.Next(time.Unix(scheduledAt, 0))
+	if next.IsZero() {
+		return nil, nil
+	}
+	return int64Ptr(next.Unix()), nil
+}
+
+func (s *Scheduler) shouldSkipLateExecution(job models.Job, scheduledAt int64, now time.Time) (bool, string) {
+	delay := now.Sub(time.Unix(scheduledAt, 0))
+	if delay <= 0 {
+		return false, ""
+	}
+
+	var grace time.Duration
+	switch job.ScheduleType {
+	case models.ScheduleTypeCron, "":
+		grace = cronMisfireGrace
+	case models.ScheduleTypeDelay, models.ScheduleTypeDatetime:
+		grace = oneTimeMisfireGrace
+	default:
+		return false, ""
+	}
+
+	if delay <= grace {
+		return false, ""
+	}
+
+	reason := fmt.Sprintf(
+		"Skipped overdue job '%s': scheduled for %s but detected at %s (%v late)",
+		job.Name,
+		time.Unix(scheduledAt, 0).Format(time.RFC3339),
+		now.Format(time.RFC3339),
+		delay.Round(time.Second),
+	)
+	return true, reason
+}
+
+func (s *Scheduler) skipDueJob(job models.Job, scheduledAt int64, now time.Time, reason string) error {
+	var nextRunAt *int64
+	var err error
+	if job.ScheduleType == models.ScheduleTypeCron || job.ScheduleType == "" {
+		nextRunAt, err = s.calculateNextRun(job, now)
+		if err != nil {
+			return err
+		}
+	}
+
+	pauseJob := job.ScheduleType == models.ScheduleTypeDelay || job.ScheduleType == models.ScheduleTypeDatetime
+	query := `UPDATE jobs
+		SET status = ?, last_result = ?, next_run_at = ?, last_scheduled_at = ?,
+		    paused = CASE WHEN ? = 1 THEN 1 ELSE paused END
+		WHERE id = ? AND paused = 0 AND next_run_at = ?`
+
+	result, err := s.jobService.db.Exec(
+		query,
+		"idle",
+		"missed",
+		nextRunAt,
+		scheduledAt,
+		boolToInt(pauseJob),
+		job.ID,
+		scheduledAt,
+	)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return nil
+	}
+
+	if nextRunAt != nil {
+		s.registerWakeEvent(job, time.Unix(*nextRunAt, 0))
+	} else {
+		s.cancelWakeEvent(job.ID)
+	}
+
+	s.createHistory(job.ID, reason, skippedJobExitCode, now, 0, int64Ptr(scheduledAt), triggerTypeSkipped)
+	log.Print(reason)
+	return nil
+}
+
+func (s *Scheduler) claimScheduledExecution(job models.Job, scheduledAt int64, nextRunAt *int64, pauseOnClaim bool) (bool, error) {
+	query := `UPDATE jobs
+		SET status = ?, next_run_at = ?, last_scheduled_at = ?,
+		    paused = CASE WHEN ? = 1 THEN 1 ELSE paused END
+		WHERE id = ? AND paused = 0 AND next_run_at = ?`
+
+	result, err := s.jobService.db.Exec(
+		query,
+		"running",
+		nextRunAt,
+		scheduledAt,
+		boolToInt(pauseOnClaim),
+		job.ID,
+		scheduledAt,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rowsAffected == 0 {
+		return false, nil
+	}
+
+	if nextRunAt != nil {
+		s.registerWakeEvent(job, time.Unix(*nextRunAt, 0))
+	} else {
+		s.cancelWakeEvent(job.ID)
+	}
+
+	return true, nil
+}
+
+func (s *Scheduler) persistNextRun(jobID string, nextRunAt *int64) error {
+	_, err := s.jobService.db.Exec(`UPDATE jobs SET next_run_at = ? WHERE id = ?`, nextRunAt, jobID)
+	return err
+}
+
+func (s *Scheduler) runScheduledJob(job models.Job, scheduledAt int64) {
+	s.runJobInternal(job, int64Ptr(scheduledAt), triggerTypeScheduled, true, false)
+}
+
+func (s *Scheduler) runImmediateJob(job models.Job) {
+	s.runJobInternal(job, nil, triggerTypeImmediate, false, true)
+}
+
+func (s *Scheduler) runJobInternal(job models.Job, scheduledAt *int64, triggerType string, alreadyMarkedRunning bool, pauseAfterRun bool) {
+	if triggerType == triggerTypeScheduled && scheduledAt == nil && job.Paused {
 		log.Printf("Skipping execution of paused job: %s", job.Name)
 		return
 	}
 
-	log.Printf("Executing job: %s", job.Name)
-
-	// Update status to running
-	job.Status = "running"
-	if _, err := s.jobService.updateJob(job, false); err != nil {
-		log.Printf("Failed to update job status: %v", err)
+	if !alreadyMarkedRunning {
+		job.Status = "running"
+		if _, err := s.jobService.updateJob(job, false); err != nil {
+			log.Printf("Failed to update job status: %v", err)
+		}
 	}
 
-	// Execute the command (wrap with caffeinate on macOS to prevent sleep mid-run)
+	log.Printf("Executing job: %s (%s)", job.Name, triggerType)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -261,7 +438,6 @@ func (s *Scheduler) runJob(job models.Job) {
 	err := cmd.Run()
 	duration := time.Since(startTime)
 
-	// Prepare output and exit code
 	output := stdout.String()
 	if stderr.Len() > 0 {
 		output += "\nSTDERR:\n" + stderr.String()
@@ -277,32 +453,33 @@ func (s *Scheduler) runJob(job models.Job) {
 		}
 	}
 
-	// Update job status
 	if exitCode == 0 {
-		job.Status = "idle"
+		if pauseAfterRun {
+			job.Status = "completed"
+		} else {
+			job.Status = "idle"
+		}
 		job.LastResult = "success"
 
-		// Play sound if specified
 		if job.SoundFile != "" {
 			go s.playSound(job.SoundFile)
 		}
-
-		// Execute on_success_cmd if specified
 		if job.OnSuccessCmd != "" {
 			go s.executeOnSuccess(job.OnSuccessCmd)
 		}
 	} else {
-		job.Status = "idle"
+		if pauseAfterRun {
+			job.Status = "failed"
+		} else {
+			job.Status = "idle"
+		}
 		job.LastResult = "failed"
 	}
 
-	// For one-time jobs, pause them after execution so they don't run again
-	if job.ScheduleType == models.ScheduleTypeDelay || job.ScheduleType == models.ScheduleTypeDatetime {
+	if pauseAfterRun {
 		job.Paused = true
-		log.Printf("Pausing one-time job after execution: %s", job.Name)
 	}
 
-	// Update last run timestamp
 	now := time.Now().Unix()
 	job.LastRunAt = &now
 
@@ -310,179 +487,8 @@ func (s *Scheduler) runJob(job models.Job) {
 		log.Printf("Failed to update job after execution: %v", err)
 	}
 
-	// Create history entry
-	s.createHistory(job.ID, output, exitCode, startTime, duration)
-
-	// Re-register macOS wake event for the next scheduled fire time (task 3.7)
-	if job.ScheduleType == models.ScheduleTypeCron {
-		if entryID, exists := s.entryMap[job.ID]; exists {
-			if entry := s.cron.Entry(entryID); !entry.Next.IsZero() {
-				s.registerWakeEvent(job, entry.Next)
-			}
-		}
-	}
-
+	s.createHistory(job.ID, output, exitCode, startTime, duration, scheduledAt, triggerType)
 	log.Printf("Job %s completed with exit code %d in %v", job.Name, exitCode, duration)
-}
-// This is used for manual triggers where the user explicitly wants to run the job
-func (s *Scheduler) runJobImmediate(job models.Job) {
-	log.Printf("Executing job immediately (bypassing pause check): %s", job.Name)
-
-	// Update status to running
-	job.Status = "running"
-	if _, err := s.jobService.updateJob(job, false); err != nil {
-		log.Printf("Failed to update job status: %v", err)
-	}
-
-	// Execute the command (wrap with caffeinate on macOS to prevent sleep mid-run)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "sh", "-c", wrapWithCaffeinate(job.Command, job.DisableMacosSleepPrevention))
-	if job.Directory != "" {
-		cmd.Dir = job.Directory
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	startTime := time.Now()
-	err := cmd.Run()
-	duration := time.Since(startTime)
-
-	// Prepare output and exit code
-	output := stdout.String()
-	if stderr.Len() > 0 {
-		output += "\nSTDERR:\n" + stderr.String()
-	}
-
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = -1
-			output += fmt.Sprintf("\nError: %v", err)
-		}
-	}
-
-	// Update job status
-	if exitCode == 0 {
-		job.Status = "idle"
-		job.LastResult = "success"
-
-		// Play sound if specified
-		if job.SoundFile != "" {
-			go s.playSound(job.SoundFile)
-		}
-
-		// Execute on_success_cmd if specified
-		if job.OnSuccessCmd != "" {
-			go s.executeOnSuccess(job.OnSuccessCmd)
-		}
-	} else {
-		job.Status = "idle"
-		job.LastResult = "failed"
-	}
-
-	// For one-time jobs, pause them after execution so they don't run again
-	if job.ScheduleType == models.ScheduleTypeDelay || job.ScheduleType == models.ScheduleTypeDatetime {
-		job.Paused = true
-		log.Printf("Pausing one-time job after execution: %s", job.Name)
-	}
-
-	// Update last run timestamp
-	now := time.Now().Unix()
-	job.LastRunAt = &now
-
-	if _, err := s.jobService.updateJob(job, false); err != nil {
-		log.Printf("Failed to update job after execution: %v", err)
-	}
-
-	// Create history entry
-	s.createHistory(job.ID, output, exitCode, startTime, duration)
-
-	log.Printf("Job %s completed with exit code %d in %v", job.Name, exitCode, duration)
-}
-
-func (s *Scheduler) runImmediateJob(job models.Job) {
-	// Immediate jobs execute once immediately
-	log.Printf("Executing immediate job: %s", job.Name)
-
-	// Update status to running
-	job.Status = "running"
-	if _, err := s.jobService.updateJob(job, false); err != nil {
-		log.Printf("Failed to update job status: %v", err)
-	}
-
-	// Execute the command (wrap with caffeinate on macOS to prevent sleep mid-run)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "sh", "-c", wrapWithCaffeinate(job.Command, job.DisableMacosSleepPrevention))
-	if job.Directory != "" {
-		cmd.Dir = job.Directory
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	startTime := time.Now()
-	err := cmd.Run()
-	duration := time.Since(startTime)
-
-	// Prepare output and exit code
-	output := stdout.String()
-	if stderr.Len() > 0 {
-		output += "\nSTDERR:\n" + stderr.String()
-	}
-
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = -1
-			output += fmt.Sprintf("\nError: %v", err)
-		}
-	}
-
-	// Mark immediate jobs as completed after execution
-	if exitCode == 0 {
-		job.Status = "completed"
-		job.LastResult = "success"
-
-		// Play sound if specified
-		if job.SoundFile != "" {
-			go s.playSound(job.SoundFile)
-		}
-
-		// Execute on_success_cmd if specified
-		if job.OnSuccessCmd != "" {
-			go s.executeOnSuccess(job.OnSuccessCmd)
-		}
-	} else {
-		job.Status = "failed"
-		job.LastResult = "failed"
-	}
-
-	// Immediate jobs don't reschedule - mark as paused
-	job.Paused = true
-
-	// Update last run timestamp
-	now := time.Now().Unix()
-	job.LastRunAt = &now
-
-	if _, err := s.jobService.updateJob(job, false); err != nil {
-		log.Printf("Failed to update job after execution: %v", err)
-	}
-
-	// Create history entry
-	s.createHistory(job.ID, output, exitCode, startTime, duration)
-
-	log.Printf("Immediate job %s completed with exit code %d in %v", job.Name, exitCode, duration)
 }
 
 func (s *Scheduler) executeOnSuccess(cmd string) {
@@ -499,7 +505,6 @@ func (s *Scheduler) playSound(soundFile string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Use afplay on macOS to play the sound
 	cmd := exec.CommandContext(ctx, "afplay", soundFile)
 	if err := cmd.Run(); err != nil {
 		log.Printf("Failed to play sound %s: %v", soundFile, err)
@@ -508,13 +513,13 @@ func (s *Scheduler) playSound(soundFile string) {
 	}
 }
 
-func (s *Scheduler) createHistory(jobID string, output string, exitCode int, startTime time.Time, duration time.Duration) {
-	query := `INSERT INTO history (id, job_id, output, exit_code, timestamp, duration_ms) VALUES (?, ?, ?, ?, ?, ?)`
+func (s *Scheduler) createHistory(jobID string, output string, exitCode int, startTime time.Time, duration time.Duration, scheduledAt *int64, triggerType string) {
+	query := `INSERT INTO history (id, job_id, output, exit_code, timestamp, duration_ms, scheduled_at, trigger_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 
 	durationMs := duration.Milliseconds()
-	timestamp := startTime.Unix() // record when the job started, not when it completed
+	timestamp := startTime.Unix()
 
-	if _, err := db.DB.Exec(query, generateHistoryID(), jobID, output, exitCode, timestamp, durationMs); err != nil {
+	if _, err := s.jobService.db.Exec(query, generateHistoryID(), jobID, output, exitCode, timestamp, durationMs, scheduledAt, triggerType); err != nil {
 		log.Printf("Failed to create history entry: %v", err)
 	}
 }
@@ -539,7 +544,6 @@ func wrapWithCaffeinate(cmd string, disabled bool) string {
 
 // shellQuote wraps s in single quotes, escaping any embedded single quotes.
 func shellQuote(s string) string {
-	// Replace ' with '\'' and wrap the whole thing in single quotes
 	result := "'"
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\'' {
@@ -552,7 +556,7 @@ func shellQuote(s string) string {
 }
 
 // registerWakeEvent schedules a macOS pmset wake event before nextFire so the
-// system is awake when the cron timer fires. No-op on non-darwin or when opted out.
+// system is awake when the timer fires. No-op on non-darwin or when opted out.
 func (s *Scheduler) registerWakeEvent(job models.Job, nextFire time.Time) {
 	if runtime.GOOS != "darwin" || job.DisableMacosSleepPrevention {
 		return
@@ -560,11 +564,9 @@ func (s *Scheduler) registerWakeEvent(job models.Job, nextFire time.Time) {
 
 	wakeTime := nextFire.Add(-MacOSWakeLeadTime)
 	if wakeTime.Before(time.Now()) {
-		// Wake time already passed — nothing to schedule
 		return
 	}
 
-	// pmset expects: MM/dd/yy HH:mm:ss
 	wakeStr := wakeTime.Format("01/02/06 15:04:05")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -578,7 +580,7 @@ func (s *Scheduler) registerWakeEvent(job models.Job, nextFire time.Time) {
 
 	s.wakeMap[job.ID] = wakeTime
 	log.Printf("Registered macOS wake event for job '%s' at %s (fires at %s)",
-		job.Name, wakeStr, nextFire.Format("15:04:05"))
+		job.Name, wakeStr, nextFire.Format(time.RFC3339))
 }
 
 // cancelWakeEvent cancels a previously registered pmset wake event for a job.
@@ -595,9 +597,19 @@ func (s *Scheduler) cancelWakeEvent(jobID string) {
 
 	cmd := exec.CommandContext(ctx, "pmset", "cancel", "wake", wakeStr)
 	if err := cmd.Run(); err != nil {
-		// Cancel failures are non-fatal — duplicate wake events are harmless
 		log.Printf("Note: pmset cancel wake for job %s returned: %v", jobID, err)
 	}
 
 	delete(s.wakeMap, jobID)
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
 }
