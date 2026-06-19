@@ -1,5 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  import { marked } from 'marked';
   import { GetJobs, CreateJob, DeleteJob, GetJobHistory, UpdateJob, PauseJob, ResumeJob, DeleteJobHistory, DeleteAllJobHistory, DuplicateJob } from '../wailsjs/go/services/JobService';
   import { ExportJobsWithDialog, PrepareImportWithDialog, ImportJobsFromFile, TriggerJob } from '../wailsjs/go/main/App';
   import { models } from '../wailsjs/go/models';
@@ -209,6 +210,17 @@
     if (!ms) return 'N/A';
     if (ms < 1000) return `${ms}ms`;
     return `${(ms / 1000).toFixed(2)}s`;
+  }
+
+  function renderMarkdown(content) {
+    if (!content) {
+      return '<p class="text-gray-500 text-sm italic">No output</p>';
+    }
+
+    return marked.parse(String(content), {
+      gfm: true,
+      breaks: true
+    });
   }
 
   // Converts a Unix timestamp (seconds) into a local datetime string (YYYY-MM-DDTHH:mm)
@@ -1037,7 +1049,9 @@
                   </button>
                 </div>
                 {#if entry.output}
-                  <pre class="bg-gray-900 rounded p-3 text-xs overflow-x-auto text-gray-300 font-mono whitespace-pre-wrap">{entry.output}</pre>
+                  <div class="history-markdown bg-gray-900 rounded p-3 text-sm overflow-x-auto text-gray-300">
+                    {@html renderMarkdown(entry.output)}
+                  </div>
                 {:else}
                   <p class="text-gray-500 text-sm italic">No output</p>
                 {/if}
