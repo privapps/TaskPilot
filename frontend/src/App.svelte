@@ -1,8 +1,9 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { marked } from 'marked';
-  import { GetJobs, CreateJob, DeleteJob, GetJobHistory, UpdateJob, PauseJob, ResumeJob, DeleteJobHistory, DeleteAllJobHistory, DuplicateJob } from '../wailsjs/go/services/JobService';
+  import { GetJobs, CreateJob, DeleteJob, GetJobHistoryPage, UpdateJob, PauseJob, ResumeJob, DeleteJobHistory, DeleteAllJobHistory, DuplicateJob } from '../wailsjs/go/services/JobService';
   import { ExportJobsWithDialog, PrepareImportWithDialog, ImportJobsFromFile, TriggerJob } from '../wailsjs/go/main/App';
+  import { BrowserOpenURL, ClipboardSetText } from '../wailsjs/runtime/runtime';
   import { models } from '../wailsjs/go/models';
   import DefaultsModal from './DefaultsModal.svelte';
   
@@ -13,6 +14,13 @@
   let selectedJobHistory = [];
   let selectedJobName = '';
   let selectedJobId = '';
+  const HISTORY_PAGE_SIZE = 20;
+  let historyOffset = 0;
+  let hasMoreHistory = false;
+  let loadingMoreHistory = false;
+  let historyModalMaximized = false;
+  let copiedHistoryId = '';
+  let copyTimeout = null;
   let editingJob = null;
   let refreshInterval;
   let newJob = {
@@ -98,6 +106,9 @@
     if (refreshInterval) {
       clearInterval(refreshInterval);
     }
+    if (copyTimeout) {
+      clearTimeout(copyTimeout);
+    }
     window.removeEventListener('keydown', handleKeyDown);
   });
 
@@ -180,12 +191,12 @@
     try {
       selectedJobName = job.name;
       selectedJobId = job.id;
+      selectedJobHistory = [];
+      historyOffset = 0;
+      hasMoreHistory = false;
+      historyModalMaximized = false;
       showHistoryModal = true;
-      selectedJobHistory = await GetJobHistory(job.id, 20) || [];
-      console.log('Loaded history entries:', selectedJobHistory.length);
-      if (selectedJobHistory.length > 0) {
-        console.log('Sample history entry:', selectedJobHistory[0]);
-      }
+      await loadHistoryPage();
     } catch (err) {
       error = 'Failed to load history: ' + err;
       console.error(err);
@@ -197,6 +208,38 @@
     selectedJobHistory = [];
     selectedJobName = '';
     selectedJobId = '';
+    historyOffset = 0;
+    hasMoreHistory = false;
+    loadingMoreHistory = false;
+    historyModalMaximized = false;
+    copiedHistoryId = '';
+  }
+
+  async function loadHistoryPage(append = false) {
+    if (!selectedJobId || (append && loadingMoreHistory)) {
+      return;
+    }
+
+    if (append) {
+      loadingMoreHistory = true;
+    }
+
+    const offset = append ? historyOffset : 0;
+    try {
+      const page = await GetJobHistoryPage(selectedJobId, HISTORY_PAGE_SIZE, offset) || [];
+      if (append) {
+        selectedJobHistory = [...selectedJobHistory, ...page];
+      } else {
+        selectedJobHistory = page;
+      }
+      historyOffset = offset + page.length;
+      hasMoreHistory = page.length === HISTORY_PAGE_SIZE;
+    } catch (err) {
+      error = 'Failed to load history: ' + err;
+      console.error('History page error:', err);
+    } finally {
+      loadingMoreHistory = false;
+    }
   }
 
   function formatTimestamp(ts) {
@@ -233,19 +276,6 @@
     return adjustedTime.toISOString().slice(0, 16); // Keep only YYYY-MM-DDTHH:mm
   }
 
-  // Validates that a datetime string represents a future point in time.
-  // Returns an error message string, or null if valid.
-  function validateFutureDatetime(dateString) {
-    const dt = new Date(dateString);
-    if (isNaN(dt.getTime())) {
-      return 'Invalid date/time value';
-    }
-    if (dt.getTime() <= Date.now()) {
-      return 'Scheduled time must be in the future';
-    }
-    return null;
-  }
-
   // Shows a success message that auto-clears after 3 seconds.
   // Cancels any pending clear to avoid race conditions when messages fire in quick succession.
   function showSuccess(message) {
@@ -278,14 +308,9 @@
       error = 'Datetime is required';
       return;
     }
-    if (scheduleType === 'datetime' && newJob.run_at) {
-      const validationError = validateFutureDatetime(newJob.run_at);
-      if (validationError) {
-        error = validationError;
-        return;
-      }
-    }
-    // No validation needed for immediate - it runs right away
+    // Datetime parsing and future-time policy are owned by the backend schedule
+    // semantics module so Wails, REST, and MCP callers share one rule set.
+    // No validation is needed for immediate - it runs right away.
 
     try {
       loading = true;
@@ -525,12 +550,47 @@
     try {
       console.log('Calling DeleteJobHistory with string:', String(historyId));
       await DeleteJobHistory(String(historyId));
-      // Refresh history
-      selectedJobHistory = await GetJobHistory(selectedJobId, 20) || [];
+      selectedJobHistory = selectedJobHistory.filter((entry) => String(entry.id) !== String(historyId));
+      historyOffset = selectedJobHistory.length;
     } catch (err) {
       error = 'Failed to delete history: ' + err;
       console.error('Delete history error:', err);
     }
+  }
+
+  async function handleCopyHistory(entry) {
+    try {
+      const copied = await ClipboardSetText(entry.output || '');
+      if (copied === false) {
+        throw new Error('Clipboard write was rejected');
+      }
+      copiedHistoryId = String(entry.id);
+      if (copyTimeout) {
+        clearTimeout(copyTimeout);
+      }
+      copyTimeout = setTimeout(() => {
+        copiedHistoryId = '';
+      }, 1500);
+    } catch (err) {
+      error = 'Failed to copy history output: ' + err;
+      console.error('Copy history error:', err);
+    }
+  }
+
+  function handleHistoryOutputClick(event) {
+    const target = event.target;
+    const link = target instanceof Element ? target.closest('a') : null;
+    if (!link) {
+      return;
+    }
+
+    const href = link.getAttribute('href') || '';
+    if (!/^https?:\/\//i.test(href)) {
+      return;
+    }
+
+    event.preventDefault();
+    BrowserOpenURL(href);
   }
 
   async function handleClearAllHistory() {
@@ -997,7 +1057,10 @@
   <!-- History Modal -->
   {#if showHistoryModal}
     <div class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onclick={closeHistoryModal}>
-      <div class="bg-gray-800 rounded-lg p-6 max-w-4xl w-full max-h-[80vh] overflow-y-auto shadow-xl" onclick={(e) => e.stopPropagation()}>
+      <div
+        class={`bg-gray-800 rounded-lg p-6 w-full shadow-xl flex flex-col ${historyModalMaximized ? 'h-full max-h-full' : 'max-w-4xl max-h-[80vh] overflow-y-auto'}`}
+        onclick={(e) => e.stopPropagation()}
+      >
         <div class="flex justify-between items-center mb-6">
           <h2 class="text-2xl font-semibold">Execution History: {selectedJobName}</h2>
           <div class="flex gap-2 items-center">
@@ -1010,55 +1073,91 @@
               </button>
             {/if}
             <button
+              onclick={() => historyModalMaximized = !historyModalMaximized}
+              class="text-gray-400 hover:text-white text-xl px-2"
+              title={historyModalMaximized ? 'Restore history window' : 'Maximize history window'}
+              aria-label={historyModalMaximized ? 'Restore history window' : 'Maximize history window'}
+            >
+              {historyModalMaximized ? '↙' : '⛶'}
+            </button>
+            <button
               onclick={closeHistoryModal}
               class="text-gray-400 hover:text-white text-2xl px-2"
+              title="Close history"
+              aria-label="Close history"
             >
               ✕
             </button>
           </div>
         </div>
-        
-        {#if selectedJobHistory.length === 0}
-          <p class="text-gray-400 text-center py-8">No execution history yet.</p>
-        {:else}
-          <div class="space-y-4">
-            {#each selectedJobHistory as entry (entry.id)}
-              <div class="bg-gray-700 rounded-lg p-4">
-                <div class="flex justify-between items-start mb-3">
-                  <div class="flex gap-4 text-sm">
-                    <span class="text-gray-400">
-                      {formatTimestamp(entry.timestamp)}
-                    </span>
-                    <span class={`px-2 py-0.5 rounded text-xs ${
-                      entry.exit_code === 0 
-                        ? 'bg-green-900/30 text-green-400 border border-green-700' 
-                        : 'bg-red-900/30 text-red-400 border border-red-700'
-                    }`}>
-                      Exit Code: {entry.exit_code}
-                    </span>
-                    <span class="text-gray-400">
-                      Duration: {formatDuration(entry.duration_ms)}
-                    </span>
+
+        <div class={historyModalMaximized ? 'flex-1 min-h-0 overflow-y-auto' : ''}>
+          {#if selectedJobHistory.length === 0}
+            <p class="text-gray-400 text-center py-8">No execution history yet.</p>
+          {:else}
+            <div class="space-y-4">
+              {#each selectedJobHistory as entry (entry.id)}
+                <div class="bg-gray-700 rounded-lg p-4">
+                  <div class="flex justify-between items-start mb-3">
+                    <div class="flex gap-4 text-sm">
+                      <span class="text-gray-400">
+                        {formatTimestamp(entry.timestamp)}
+                      </span>
+                      <span class={`px-2 py-0.5 rounded text-xs ${
+                        entry.exit_code === 0
+                          ? 'bg-green-900/30 text-green-400 border border-green-700'
+                          : 'bg-red-900/30 text-red-400 border border-red-700'
+                      }`}>
+                        Exit Code: {entry.exit_code}
+                      </span>
+                      <span class="text-gray-400">
+                        Duration: {formatDuration(entry.duration_ms)}
+                      </span>
+                    </div>
+                    <div class="flex gap-2">
+                      <button
+                        onclick={() => handleCopyHistory(entry)}
+                        class="px-3 py-1 bg-blue-600/50 hover:bg-blue-600 rounded text-xs font-medium transition-colors"
+                        title="Copy output"
+                      >
+                        {copiedHistoryId === String(entry.id) ? 'Copied' : 'Copy'}
+                      </button>
+                      <button
+                        onclick={() => handleDeleteHistory(entry.id)}
+                        class="px-3 py-1 bg-red-600/50 hover:bg-red-600 rounded text-xs font-medium transition-colors"
+                        title="Delete this entry"
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    onclick={() => handleDeleteHistory(entry.id)}
-                    class="px-3 py-1 bg-red-600/50 hover:bg-red-600 rounded text-xs font-medium transition-colors"
-                    title="Delete this entry"
-                  >
-                    Delete
-                  </button>
+                  {#if entry.output}
+                    <div
+                      class="history-markdown bg-gray-900 rounded p-3 text-sm overflow-x-auto text-gray-300"
+                      onclick={handleHistoryOutputClick}
+                    >
+                      {@html renderMarkdown(entry.output)}
+                    </div>
+                  {:else}
+                    <p class="text-gray-500 text-sm italic">No output</p>
+                  {/if}
                 </div>
-                {#if entry.output}
-                  <div class="history-markdown bg-gray-900 rounded p-3 text-sm overflow-x-auto text-gray-300">
-                    {@html renderMarkdown(entry.output)}
-                  </div>
-                {:else}
-                  <p class="text-gray-500 text-sm italic">No output</p>
-                {/if}
+              {/each}
+            </div>
+
+            {#if hasMoreHistory}
+              <div class="flex justify-center pt-5">
+                <button
+                  onclick={() => loadHistoryPage(true)}
+                  disabled={loadingMoreHistory}
+                  class="px-4 py-2 bg-gray-600 hover:bg-gray-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-md text-sm font-medium transition-colors"
+                >
+                  {loadingMoreHistory ? 'Loading...' : 'Load more'}
+                </button>
               </div>
-            {/each}
-          </div>
-        {/if}
+            {/if}
+          {/if}
+        </div>
       </div>
     </div>
   {/if}

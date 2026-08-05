@@ -19,6 +19,7 @@ TaskPilot follows an "openspec" specification-driven development process. All ma
 - **REST API server** for programmatic access to job management (spec: openspec/changes/rest-api-server/specs/rest-api-server/spec.md)
 - Interactive Swagger API documentation
 - Job execution history tracking (`/api/jobs/{job_id}/history` endpoint, spec: openspec/changes/api-enhancements/specs/job-history-endpoint/spec.md)
+- History modal with Markdown output, external browser links, per-entry copy/delete actions, maximize/restore, and incremental loading of older entries
 - Default job settings configuration (API server port and more; configurable, restart required)
 - macOS LaunchAgent support for running the headless daemon outside the GUI process
 - All major features and APIs are covered by testable requirements and scenarios in openspec docs
@@ -259,6 +260,20 @@ For complete API documentation and formal requirements, see [API_DOCUMENTATION.m
 - `timestamp` (DATETIME): Execution time
 - `scheduled_at` (INTEGER): Scheduled fire time when applicable
 - `trigger_type` (TEXT): scheduled, manual, immediate, skipped, or event
+
+### History View
+
+Select **History** on a job card to open its execution history. The view loads the
+20 newest entries first and provides **Load more** for older entries. Each entry
+supports:
+
+- Markdown-rendered output, with HTTP/HTTPS links opened in the system browser
+- **Copy** to copy the raw output, including Markdown syntax
+- **Delete** for removing an individual history record
+
+Use the maximize/restore control in the modal header to expand the history view
+when reviewing long output or many entries. The REST history endpoints remain
+available for programmatic access as documented in [API_DOCUMENTATION.md](API_DOCUMENTATION.md).
 
 ## Testing
 

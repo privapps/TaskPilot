@@ -269,6 +269,31 @@ func TestJobService_GetHistory(t *testing.T) {
 	}
 }
 
+func TestJobService_GetJobHistoryPage(t *testing.T) {
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("Failed to create mock: %v", err)
+	}
+	defer sqlDB.Close()
+
+	jobID := "job-id"
+	rows := sqlmock.NewRows([]string{"id", "job_id", "output", "exit_code", "timestamp", "duration_ms", "scheduled_at", "trigger_type"}).
+		AddRow("history-1", jobID, "output", 0, time.Now().Unix(), 100, nil, "scheduled")
+	mock.ExpectQuery("SELECT").WithArgs(jobID, 2, 4).WillReturnRows(rows)
+
+	service := NewJobServiceWithDB(&db.Database{DB: sqlDB})
+	history, err := service.GetJobHistoryPage(jobID, 2, 4)
+	if err != nil {
+		t.Fatalf("GetJobHistoryPage() unexpected error: %v", err)
+	}
+	if len(history) != 1 || history[0].ID != "history-1" {
+		t.Fatalf("GetJobHistoryPage() returned unexpected history: %+v", history)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %v", err)
+	}
+}
+
 // Note: TestJobService_GetJobByID, UpdateJob, DeleteJob would follow similar patterns
 // but are limited by the difficulty of mocking sql.Rows and sql.Row without
 // significant infrastructure. These tests demonstrate the pattern and verify

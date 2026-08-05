@@ -46,6 +46,10 @@ export function GetJobHistory(arg1, arg2) {
   return window['go']['services']['JobService']['GetJobHistory'](arg1, arg2);
 }
 
+export function GetJobHistoryPage(arg1, arg2, arg3) {
+  return window['go']['services']['JobService']['GetJobHistoryPage'](arg1, arg2, arg3);
+}
+
 export function GetJobs() {
   return window['go']['services']['JobService']['GetJobs']();
 }

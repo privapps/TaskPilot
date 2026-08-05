@@ -25,6 +25,8 @@ export function GetJobByID(arg1:string):Promise<models.Job>;
 
 export function GetJobHistory(arg1:string,arg2:number):Promise<Array<models.History>>;
 
+export function GetJobHistoryPage(arg1:string,arg2:number,arg3:number):Promise<Array<models.History>>;
+
 export function GetJobs():Promise<Array<models.Job>>;
 
 export function ImportJobs(arg1:string):Promise<void>;

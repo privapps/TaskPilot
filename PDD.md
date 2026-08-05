@@ -97,7 +97,10 @@ Because you are on a Mac, we must handle the **App Sandbox**.
 
 ### View 3: Execution Logs
 
-* A terminal-style view (using Xterm.js or a simple CSS pre-block) to see the `stdout` of previous runs.
+* A History modal showing execution metadata and Markdown-rendered `stdout` from previous runs.
+* History is loaded in pages so older entries can be retrieved without loading the entire log at once.
+* Each entry provides copy and delete actions; HTTP/HTTPS links open in the system browser.
+* The modal can be maximized for reviewing long output and larger histories.
 
 ---
 
