@@ -85,7 +85,8 @@ func migrate() error {
 		last_run_at INTEGER,
 		next_run_at INTEGER,
 		last_scheduled_at INTEGER,
-		disable_macos_sleep_prevention BOOLEAN DEFAULT 0
+		disable_macos_sleep_prevention BOOLEAN DEFAULT 0,
+		timeout_minutes INTEGER
 	)`
 
 	if _, err := DB.Exec(jobsTable); err != nil {
@@ -129,6 +130,7 @@ func migrate() error {
 
 	// Add disable_macos_sleep_prevention column for per-job opt-out of macOS sleep prevention
 	_, _ = DB.Exec(`ALTER TABLE jobs ADD COLUMN disable_macos_sleep_prevention BOOLEAN DEFAULT 0`)
+	_, _ = DB.Exec(`ALTER TABLE jobs ADD COLUMN timeout_minutes INTEGER`)
 
 	_, _ = DB.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_next_run_at ON jobs(next_run_at)`)
 	_, _ = DB.Exec(`CREATE INDEX IF NOT EXISTS idx_jobs_active_next_run_at ON jobs(paused, next_run_at)`)
@@ -152,7 +154,8 @@ func migrate() error {
 		working_directory TEXT,
 		sound_file TEXT,
 		on_success_cmd TEXT,
-		api_port INTEGER DEFAULT 8080
+		api_port INTEGER DEFAULT 8080,
+		default_timeout_minutes INTEGER NOT NULL DEFAULT 10
 	)`
 
 	if _, err := DB.Exec(defaultsTable); err != nil {
@@ -161,6 +164,7 @@ func migrate() error {
 
 	// Add api_port column for existing databases
 	_, _ = DB.Exec(`ALTER TABLE defaults ADD COLUMN api_port INTEGER DEFAULT 8080`)
+	_, _ = DB.Exec(`ALTER TABLE defaults ADD COLUMN default_timeout_minutes INTEGER NOT NULL DEFAULT 10`)
 
 	log.Println("Database tables created successfully")
 	return nil

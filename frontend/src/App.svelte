@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { marked } from 'marked';
   import { GetJobs, CreateJob, DeleteJob, GetJobHistoryPage, UpdateJob, PauseJob, ResumeJob, DeleteJobHistory, DeleteAllJobHistory, DuplicateJob } from '../wailsjs/go/services/JobService';
-  import { ExportJobsWithDialog, PrepareImportWithDialog, ImportJobsFromFile, TriggerJob } from '../wailsjs/go/main/App';
+  import { ExportJobsWithDialog, PrepareImportWithDialog, ImportJobsFromFile, TriggerJob, GetDefaults } from '../wailsjs/go/main/App';
   import { BrowserOpenURL, ClipboardSetText } from '../wailsjs/runtime/runtime';
   import { models } from '../wailsjs/go/models';
   import DefaultsModal from './DefaultsModal.svelte';
@@ -22,6 +22,7 @@
   let copiedHistoryId = '';
   let copyTimeout = null;
   let editingJob = null;
+  let defaultTimeoutMinutes = 10;
   let refreshInterval;
   let newJob = {
     name: '',
@@ -33,8 +34,10 @@
     schedule_type: 'cron',
     delay_minutes: null,
     run_at: null,
+    timeout_minutes: '',
     disable_macos_sleep_prevention: false
   };
+  let timeoutError = '';
   let loading = false;
   let error = '';
   let successMessage = '';
@@ -55,7 +58,7 @@
         if (!window.go || !window.go.services || !window.go.services.JobService) {
           return false;
         }
-        
+
         // Check if WebSocket is connected (for dev mode)
         if (window.runtime && window.runtime.websocket) {
           const ws = window.runtime.websocket;
@@ -95,6 +98,7 @@
     // Add a small delay to ensure WebSocket is fully ready
     await new Promise(resolve => setTimeout(resolve, 200));
     await loadJobs();
+    await loadDefaultTimeout();
     // Auto-refresh every 5 seconds to see status updates
     refreshInterval = setInterval(loadJobs, 5000);
     
@@ -159,6 +163,18 @@
     } catch (err) {
       error = 'Failed to load jobs: ' + err;
       console.error(err);
+    }
+  }
+
+  async function loadDefaultTimeout() {
+    try {
+      const defaults = await GetDefaults();
+      const timeout = defaults?.default_timeout_minutes;
+      defaultTimeoutMinutes = Number.isInteger(timeout) && timeout >= 1 && timeout <= 1440
+        ? timeout
+        : 10;
+    } catch (err) {
+      console.error('Failed to load default job timeout:', err);
     }
   }
 
@@ -285,9 +301,21 @@
   }
 
   async function handleCreateJob() {
+    timeoutError = '';
     if (!wailsReady) {
       error = 'Application is still initializing. Please wait...';
       return;
+    }
+
+    let timeoutMinutes = null;
+    const timeoutInput = newJob.timeout_minutes;
+    if (timeoutInput !== '' && timeoutInput !== null && timeoutInput !== undefined) {
+      const parsedTimeout = Number(timeoutInput);
+      if (!Number.isInteger(parsedTimeout) || parsedTimeout < 1 || parsedTimeout > 1440) {
+        timeoutError = 'Timeout must be a whole number between 1 and 1440 minutes, or leave it blank to use the default.';
+        return;
+      }
+      timeoutMinutes = parsedTimeout;
     }
     
     if (!newJob.name || !newJob.command) {
@@ -327,6 +355,7 @@
         schedule_type: scheduleType,
         delay_minutes: null,
         run_at: null,
+        timeout_minutes: timeoutMinutes,
         disable_macos_sleep_prevention: newJob.disable_macos_sleep_prevention,
         paused: false  // When editing, unpause the job (especially important for one-time jobs)
       };
@@ -373,8 +402,10 @@
         schedule_type: 'cron',
         delay_minutes: null,
         run_at: null,
+        timeout_minutes: '',
         disable_macos_sleep_prevention: false
       };
+      timeoutError = '';
       scheduleType = 'cron';
       editingJob = null;
       
@@ -472,11 +503,13 @@
       schedule_type: job.schedule_type || 'cron',
       delay_minutes: job.delay_minutes || null,
       run_at: job.run_at ? convertUnixToLocalDatetime(job.run_at) : null,
+      timeout_minutes: job.timeout_minutes ?? '',
       disable_macos_sleep_prevention: job.disable_macos_sleep_prevention || false
     };
     
     showModal = true;
     error = '';
+    timeoutError = '';
   }
 
   async function handleExport() {
@@ -519,6 +552,9 @@
       
       // Proceed with import
       await ImportJobsFromFile(result.filepath);
+      if (result.hasDefaults) {
+        await loadDefaultTimeout();
+      }
       
       if (result.hasDefaults) {
         showSuccess('Jobs and defaults imported successfully!');
@@ -535,7 +571,8 @@
     }
   }
 
-  function handleDefaultsSaved() {
+  async function handleDefaultsSaved() {
+    await loadDefaultTimeout();
     showSuccess('Default settings saved successfully!');
   }
 
@@ -681,16 +718,19 @@
       schedule_type: 'cron',
       delay_minutes: null,
       run_at: null,
+      timeout_minutes: '',
       disable_macos_sleep_prevention: false
     };
     showModal = true;
     error = '';
+    timeoutError = '';
   }
 
   function closeModal() {
     showModal = false;
     editingJob = null;
     error = '';
+    timeoutError = '';
   }
 </script>
 
@@ -996,6 +1036,33 @@
               class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="/path/to/directory"
             />
+          </div>
+
+          <div>
+            <label for="timeout_minutes" class="block text-sm font-medium mb-2">Timeout (minutes)</label>
+            <input
+              id="timeout_minutes"
+              type="number"
+              bind:value={newJob.timeout_minutes}
+              class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder={`Use default (${defaultTimeoutMinutes} minutes)`}
+              min="1"
+              max="1440"
+              step="1"
+              aria-invalid={timeoutError !== ''}
+              aria-describedby={timeoutError ? 'timeout-help timeout-error' : 'timeout-help'}
+              oninput={() => timeoutError = ''}
+              oninvalid={(event) => {
+                event.preventDefault();
+                timeoutError = 'Timeout must be a whole number between 1 and 1440 minutes, or leave it blank to use the default.';
+              }}
+            />
+            <p id="timeout-help" class="text-xs text-gray-400 mt-1">
+              Leave blank to use the current default ({defaultTimeoutMinutes} minutes). Valid range: 1–1440 whole minutes.
+            </p>
+            {#if timeoutError}
+              <p id="timeout-error" class="text-sm text-red-300 mt-1" role="alert">{timeoutError}</p>
+            {/if}
           </div>
 
           <div>

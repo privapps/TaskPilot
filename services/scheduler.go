@@ -13,10 +13,12 @@ const (
 	// MacOSWakeLeadTime is how far before a scheduled fire time we wake the Mac.
 	MacOSWakeLeadTime = 2 * time.Minute
 
-	schedulerPollInterval = 5 * time.Second
-	cronMisfireGrace      = 10 * time.Minute
-	oneTimeMisfireGrace   = 5 * time.Minute
-	skippedJobExitCode    = -2
+	schedulerPollInterval    = 5 * time.Second
+	cronMisfireGrace         = 10 * time.Minute
+	oneTimeMisfireGrace      = 5 * time.Minute
+	skippedJobExitCode       = -2
+	defaultJobTimeoutMinutes = 10
+	jobTimedOutExitCode      = 124
 
 	triggerTypeEvent     = "event"
 	triggerTypeImmediate = "immediate"
@@ -27,15 +29,16 @@ const (
 )
 
 type Scheduler struct {
-	schedule    *ScheduleSemantics
-	persistence *JobPersistence
-	jobService  *JobService
-	executor    JobExecutor
-	commands    CommandRunner
-	sound       SoundPlayer
-	wakeEvents  WakeEventAdapter
-	stopTicker  chan bool
-	wakeMap     map[string]time.Time // maps job ID to registered pmset wake time
+	schedule              *ScheduleSemantics
+	persistence           *JobPersistence
+	jobService            *JobService
+	executor              JobExecutor
+	commands              CommandRunner
+	sound                 SoundPlayer
+	wakeEvents            WakeEventAdapter
+	timeoutMinuteDuration time.Duration
+	stopTicker            chan bool
+	wakeMap               map[string]time.Time // maps job ID to registered pmset wake time
 }
 
 func NewScheduler(jobService *JobService) *Scheduler {
@@ -44,15 +47,16 @@ func NewScheduler(jobService *JobService) *Scheduler {
 
 func NewSchedulerWithAdapters(jobService *JobService, executor JobExecutor, commands CommandRunner, sound SoundPlayer, wakeEvents WakeEventAdapter) *Scheduler {
 	return &Scheduler{
-		schedule:    jobService.schedule,
-		persistence: jobService.persistence,
-		jobService:  jobService,
-		executor:    executor,
-		commands:    commands,
-		sound:       sound,
-		wakeEvents:  wakeEvents,
-		stopTicker:  make(chan bool, 1),
-		wakeMap:     make(map[string]time.Time),
+		schedule:              jobService.schedule,
+		persistence:           jobService.persistence,
+		jobService:            jobService,
+		executor:              executor,
+		commands:              commands,
+		sound:                 sound,
+		wakeEvents:            wakeEvents,
+		timeoutMinuteDuration: time.Minute,
+		stopTicker:            make(chan bool, 1),
+		wakeMap:               make(map[string]time.Time),
 	}
 }
 
@@ -353,16 +357,36 @@ func (s *Scheduler) runJobInternal(job models.Job, scheduledAt *int64, triggerTy
 		}
 	}
 
-	log.Printf("Executing job: %s (%s)", job.Name, triggerType)
+	timeoutMinutes := defaultJobTimeoutMinutes
+	if job.TimeoutMinutes != nil {
+		timeoutMinutes = *job.TimeoutMinutes
+	} else if defaults, err := s.jobService.defaultsService.GetDefaults(); err != nil {
+		log.Printf("Failed to load default job timeout, using built-in %d-minute timeout: %v", defaultJobTimeoutMinutes, err)
+	} else if defaults != nil && defaults.DefaultTimeoutMinutes >= minJobTimeoutMinutes && defaults.DefaultTimeoutMinutes <= maxJobTimeoutMinutes {
+		timeoutMinutes = defaults.DefaultTimeoutMinutes
+	}
+	timeout := time.Duration(timeoutMinutes) * s.timeoutMinuteDuration
+	log.Printf("Executing job: %s (%s) with effective timeout %d minutes", job.Name, triggerType, timeoutMinutes)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
 	result := s.executor.Execute(ctx, job)
+	timedOut := result.TimedOut || ctx.Err() == context.DeadlineExceeded
+	cancel()
 	output := result.Output
 	exitCode := result.ExitCode
 	startTime := result.StartedAt
 	duration := result.Duration
+	if timedOut {
+		exitCode = jobTimedOutExitCode
+		timeoutMessage := fmt.Sprintf("job timed out after %d minutes", timeoutMinutes)
+		if output == "" {
+			output = timeoutMessage
+		} else {
+			output += "\n" + timeoutMessage
+		}
+		log.Printf("Job %s timed out after %d minutes", job.Name, timeoutMinutes)
+	}
 
 	if exitCode == 0 {
 		if pauseAfterRun {

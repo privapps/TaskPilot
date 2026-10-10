@@ -15,28 +15,47 @@ import (
 
 // APIServer handles REST API endpoints for job management
 type APIServer struct {
-	jobService *JobService
-	mcpServer  *MCPServer
-	server     *http.Server
-	port       int
+	jobService      *JobService
+	defaultsService *DefaultsService
+	mcpServer       *MCPServer
+	server          *http.Server
+	port            int
 }
 
 // NewAPIServer creates a new API server instance
 func NewAPIServer(jobService *JobService, port int) *APIServer {
 	return &APIServer{
-		jobService: jobService,
-		mcpServer:  NewMCPServer(jobService),
-		port:       port,
+		jobService:      jobService,
+		defaultsService: jobService.defaultsService,
+		mcpServer:       NewMCPServer(jobService),
+		port:            port,
 	}
 }
 
 // Start initializes and starts the HTTP server in a goroutine
 func (s *APIServer) Start(ctx context.Context) error {
+	s.server = &http.Server{
+		Addr:    fmt.Sprintf(":%d", s.port),
+		Handler: s.handler(),
+	}
+
+	go func() {
+		log.Printf("Starting API server on port %d (MCP endpoint: http://localhost:%d/api/mcp)", s.port, s.port)
+		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("API server error: %v", err)
+		}
+	}()
+
+	return nil
+}
+
+func (s *APIServer) handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Job endpoints
 	mux.HandleFunc("/api/jobs", s.handleJobs)
 	mux.HandleFunc("/api/jobs/", s.handleJobByID)
+	mux.HandleFunc("/api/defaults", s.handleDefaults)
 
 	// History endpoints
 	mux.HandleFunc("/api/history", s.handleHistory)
@@ -52,19 +71,7 @@ func (s *APIServer) Start(ctx context.Context) error {
 	// Swagger documentation endpoint
 	mux.HandleFunc("/api/swagger", s.handleSwagger)
 
-	s.server = &http.Server{
-		Addr:    fmt.Sprintf(":%d", s.port),
-		Handler: s.enableCORS(mux),
-	}
-
-	go func() {
-		log.Printf("Starting API server on port %d (MCP endpoint: http://localhost:%d/api/mcp)", s.port, s.port)
-		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("API server error: %v", err)
-		}
-	}()
-
-	return nil
+	return s.enableCORS(mux)
 }
 
 // Shutdown gracefully stops the HTTP server
@@ -90,6 +97,36 @@ func (s *APIServer) enableCORS(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *APIServer) handleDefaults(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		defaults, err := s.defaultsService.GetDefaults()
+		if err != nil {
+			s.sendError(w, fmt.Sprintf("Failed to get defaults: %v", err), http.StatusInternalServerError)
+			return
+		}
+		s.sendJSON(w, defaults, http.StatusOK)
+	case http.MethodPut:
+		var defaults models.Defaults
+		if err := json.NewDecoder(r.Body).Decode(&defaults); err != nil {
+			s.sendError(w, fmt.Sprintf("Invalid defaults payload: %v", err), http.StatusBadRequest)
+			return
+		}
+		if err := validateDefaultTimeoutMinutes(defaults.DefaultTimeoutMinutes); err != nil {
+			s.sendError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		updated, err := s.defaultsService.UpdateDefaults(&defaults)
+		if err != nil {
+			s.sendError(w, fmt.Sprintf("Failed to update defaults: %v", err), http.StatusInternalServerError)
+			return
+		}
+		s.sendJSON(w, updated, http.StatusOK)
+	default:
+		s.sendError(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // handleJobs routes GET (list) and POST (create) for /api/jobs
@@ -732,6 +769,47 @@ func (s *APIServer) handleSwagger(w http.ResponseWriter, r *http.Request) {
 					},
 				},
 			},
+			"/api/defaults": map[string]interface{}{
+				"get": map[string]interface{}{
+					"summary":     "Get application defaults",
+					"description": "Get the persisted application defaults, including the default job timeout in minutes",
+					"tags":        []string{"defaults"},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Current defaults",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{"$ref": "#/components/schemas/Defaults"},
+								},
+							},
+						},
+					},
+				},
+				"put": map[string]interface{}{
+					"summary":     "Update application defaults",
+					"description": "Update application defaults; default_timeout_minutes must be an integer from 1 to 1440",
+					"tags":        []string{"defaults"},
+					"requestBody": map[string]interface{}{
+						"required": true,
+						"content": map[string]interface{}{
+							"application/json": map[string]interface{}{
+								"schema": map[string]interface{}{"$ref": "#/components/schemas/Defaults"},
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "Updated defaults",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{"$ref": "#/components/schemas/Defaults"},
+								},
+							},
+						},
+						"400": map[string]interface{}{"description": "Invalid request or timeout outside 1–1440"},
+					},
+				},
+			},
 			"/api/jobs/{id}": map[string]interface{}{
 				"get": map[string]interface{}{
 					"summary":     "Get job by ID",
@@ -1044,24 +1122,48 @@ func (s *APIServer) handleSwagger(w http.ResponseWriter, r *http.Request) {
 				"Job": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":                map[string]interface{}{"type": "string"},
-						"name":              map[string]interface{}{"type": "string"},
-						"command":           map[string]interface{}{"type": "string"},
-						"directory":         map[string]interface{}{"type": "string"},
-						"schedule":          map[string]interface{}{"type": "string"},
-						"sound_file":        map[string]interface{}{"type": "string"},
-						"on_success_cmd":    map[string]interface{}{"type": "string"},
-						"last_result":       map[string]interface{}{"type": "string"},
-						"status":            map[string]interface{}{"type": "string"},
-						"schedule_type":     map[string]interface{}{"type": "string"},
-						"paused":            map[string]interface{}{"type": "boolean"},
-						"run_at":            map[string]interface{}{"type": "integer", "format": "int64"},
-						"delay_minutes":     map[string]interface{}{"type": "integer"},
+						"id":             map[string]interface{}{"type": "string"},
+						"name":           map[string]interface{}{"type": "string"},
+						"command":        map[string]interface{}{"type": "string"},
+						"directory":      map[string]interface{}{"type": "string"},
+						"schedule":       map[string]interface{}{"type": "string"},
+						"sound_file":     map[string]interface{}{"type": "string"},
+						"on_success_cmd": map[string]interface{}{"type": "string"},
+						"last_result":    map[string]interface{}{"type": "string"},
+						"status":         map[string]interface{}{"type": "string"},
+						"schedule_type":  map[string]interface{}{"type": "string"},
+						"paused":         map[string]interface{}{"type": "boolean"},
+						"run_at":         map[string]interface{}{"type": "integer", "format": "int64"},
+						"delay_minutes":  map[string]interface{}{"type": "integer"},
+						"timeout_minutes": map[string]interface{}{
+							"type":        "integer",
+							"nullable":    true,
+							"minimum":     minJobTimeoutMinutes,
+							"maximum":     maxJobTimeoutMinutes,
+							"description": "Optional per-job timeout in minutes; null uses the current default from /api/defaults, falling back to 10 minutes",
+						},
 						"last_run_at":       map[string]interface{}{"type": "integer", "format": "int64"},
 						"next_run_at":       map[string]interface{}{"type": "integer", "format": "int64"},
 						"last_scheduled_at": map[string]interface{}{"type": "integer", "format": "int64"},
 					},
 					"required": []string{"name", "command", "schedule"},
+				},
+				"Defaults": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"working_directory": map[string]interface{}{"type": "string"},
+						"sound_file":        map[string]interface{}{"type": "string"},
+						"on_success_cmd":    map[string]interface{}{"type": "string"},
+						"api_port":          map[string]interface{}{"type": "integer", "default": 8080},
+						"default_timeout_minutes": map[string]interface{}{
+							"type":        "integer",
+							"minimum":     minJobTimeoutMinutes,
+							"maximum":     maxJobTimeoutMinutes,
+							"default":     defaultJobTimeoutMinutes,
+							"description": "Timeout for jobs without timeout_minutes; changed defaults apply on the next run",
+						},
+					},
+					"required": []string{"default_timeout_minutes"},
 				},
 				"History": map[string]interface{}{
 					"type": "object",

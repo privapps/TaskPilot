@@ -38,6 +38,35 @@ This provides a complete OpenAPI 3.0 specification with all endpoint details, re
 
 ## Endpoints
 
+### Defaults
+
+#### Get Application Defaults
+```http
+GET /api/defaults
+```
+
+Returns the persisted application defaults. `default_timeout_minutes` is 10 for a fresh or upgraded database when no value has been saved.
+
+#### Update Application Defaults
+```http
+PUT /api/defaults
+Content-Type: application/json
+```
+
+Update the application defaults, including the global job timeout:
+
+```json
+{
+  "working_directory": "/path/to/working/dir",
+  "sound_file": "",
+  "on_success_cmd": "",
+  "api_port": 8080,
+  "default_timeout_minutes": 10
+}
+```
+
+`default_timeout_minutes` must be an integer from 1 through 1440. Invalid values return HTTP 400 with a descriptive error. Jobs without their own `timeout_minutes` use the currently stored default on their next run; if no default row exists, they use 10 minutes.
+
 ### Jobs
 
 #### List All Jobs
@@ -450,6 +479,7 @@ Access-Control-Allow-Headers: Content-Type
 | `paused` | boolean | Whether job is paused |
 | `run_at` | integer | Unix timestamp for one-time execution |
 | `delay_minutes` | integer | Delay in minutes for delay-based scheduling |
+| `timeout_minutes` | integer or null | Optional per-job timeout in minutes (1–1440); null or omitted uses the current global default, or 10 minutes if none is stored |
 | `last_run_at` | integer | Unix timestamp of last execution |
 
 ### History Object

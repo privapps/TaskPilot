@@ -38,7 +38,8 @@ func newSchedulerTestHarness(t *testing.T) (*sql.DB, *JobService, *Scheduler) {
 			last_run_at INTEGER,
 			next_run_at INTEGER,
 			last_scheduled_at INTEGER,
-			disable_macos_sleep_prevention BOOLEAN DEFAULT 0
+			disable_macos_sleep_prevention BOOLEAN DEFAULT 0,
+			timeout_minutes INTEGER
 		)`,
 		`CREATE TABLE history (
 			id TEXT PRIMARY KEY,
@@ -55,7 +56,8 @@ func newSchedulerTestHarness(t *testing.T) (*sql.DB, *JobService, *Scheduler) {
 			working_directory TEXT,
 			sound_file TEXT,
 			on_success_cmd TEXT,
-			api_port INTEGER DEFAULT 8080
+			api_port INTEGER DEFAULT 8080,
+			default_timeout_minutes INTEGER NOT NULL DEFAULT 10
 		)`,
 	}
 
@@ -82,11 +84,11 @@ func insertSchedulerTestJob(t *testing.T, sqlDB *sql.DB, job models.Job) {
 		`INSERT INTO jobs (
 			id, name, command, directory, schedule, sound_file, on_success_cmd, last_result,
 			status, schedule_type, paused, run_at, delay_minutes, last_run_at, next_run_at,
-			last_scheduled_at, disable_macos_sleep_prevention
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			last_scheduled_at, disable_macos_sleep_prevention, timeout_minutes
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, job.Name, job.Command, job.Directory, job.Schedule, job.SoundFile, job.OnSuccessCmd, job.LastResult,
 		job.Status, job.ScheduleType, job.Paused, job.RunAt, job.DelayMinutes, job.LastRunAt, job.NextRunAt,
-		job.LastScheduledAt, job.DisableMacosSleepPrevention,
+		job.LastScheduledAt, job.DisableMacosSleepPrevention, job.TimeoutMinutes,
 	)
 	if err != nil {
 		t.Fatalf("insert job: %v", err)

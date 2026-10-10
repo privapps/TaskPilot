@@ -8,8 +8,10 @@
   let soundFile = '';
   let onSuccessCmd = '';
   let apiPort = 8080;
+  let defaultTimeoutMinutes = 10;
   let loading = false;
   let error = '';
+  let defaultTimeoutError = '';
   let validationWarning = '';
   let showRestartMessage = false;
   
@@ -23,12 +25,14 @@
     try {
       loading = true;
       error = '';
+      defaultTimeoutError = '';
       const defaults = await GetDefaults();
       if (defaults) {
         workingDirectory = defaults.working_directory || '';
         soundFile = defaults.sound_file || '';
         onSuccessCmd = defaults.on_success_cmd || '';
         apiPort = defaults.api_port || 8080;
+        defaultTimeoutMinutes = defaults.default_timeout_minutes ?? 10;
       }
     } catch (err) {
       error = 'Failed to load defaults: ' + err;
@@ -41,7 +45,14 @@
     try {
       loading = true;
       error = '';
+      defaultTimeoutError = '';
       validationWarning = '';
+
+      if (!Number.isInteger(defaultTimeoutMinutes) || defaultTimeoutMinutes < 1 || defaultTimeoutMinutes > 1440) {
+        defaultTimeoutError = 'Default timeout must be a whole number between 1 and 1440 minutes.';
+        loading = false;
+        return;
+      }
       
       // Basic validation warning for non-existent directory
       if (workingDirectory && workingDirectory.trim()) {
@@ -63,7 +74,8 @@
         working_directory: workingDirectory,
         sound_file: soundFile,
         on_success_cmd: onSuccessCmd,
-        api_port: apiPort
+        api_port: apiPort,
+        default_timeout_minutes: defaultTimeoutMinutes
       };
       
       await UpdateDefaults(defaults);
@@ -84,6 +96,7 @@
   function handleCancel() {
     show = false;
     error = '';
+    defaultTimeoutError = '';
     validationWarning = '';
   }
   
@@ -119,7 +132,7 @@
         </div>
       {/if}
       
-      <form onsubmit={(e) => { e.preventDefault(); handleSave(); }} class="space-y-4">
+      <form onsubmit={(e) => { e.preventDefault(); handleSave(); }} novalidate class="space-y-4">
         <div>
           <label for="default-directory" class="block text-sm font-medium mb-2">
             Working Directory
@@ -137,6 +150,31 @@
           />
         </div>
         
+        <div>
+          <label for="default-timeout" class="block text-sm font-medium mb-2">
+            Default Timeout (minutes)
+          </label>
+          <input
+            id="default-timeout"
+            type="number"
+            bind:value={defaultTimeoutMinutes}
+            min="1"
+            max="1440"
+            step="1"
+            oninput={() => defaultTimeoutError = ''}
+            aria-invalid={defaultTimeoutError !== ''}
+            aria-describedby="default-timeout-help"
+            class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            disabled={loading}
+          />
+          <p id="default-timeout-help" class="text-xs text-gray-400 mt-1">
+            Applied to jobs without a per-job timeout on their next run. Valid range: 1–1440 minutes.
+          </p>
+          {#if defaultTimeoutError}
+            <p class="text-sm text-red-300 mt-1" role="alert">{defaultTimeoutError}</p>
+          {/if}
+        </div>
+
         <div>
           <label for="default-sound" class="block text-sm font-medium mb-2">
             Sound File

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"taskpilot/db"
@@ -50,6 +51,10 @@ func (s *JobService) GetJobs() ([]models.Job, error) {
 }
 
 func (s *JobService) CreateJob(job models.Job) (models.Job, error) {
+	if err := validateTimeoutMinutes(job.TimeoutMinutes); err != nil {
+		return models.Job{}, err
+	}
+
 	if job.ID == "" {
 		job.ID = uuid.New().String()
 	}
@@ -86,6 +91,10 @@ func (s *JobService) CreateJob(job models.Job) (models.Job, error) {
 }
 
 func (s *JobService) UpdateJob(job models.Job) (models.Job, error) {
+	if err := validateTimeoutMinutes(job.TimeoutMinutes); err != nil {
+		return models.Job{}, err
+	}
+
 	normalized, err := s.schedule.Normalize(job)
 	if err != nil {
 		return models.Job{}, err
@@ -373,7 +382,37 @@ func (s *JobService) ImportJobs(filepath string) error {
 		return fmt.Errorf("unsupported version: %s", export.Version)
 	}
 
+	if export.Defaults != nil {
+		var rawExport struct {
+			Defaults json.RawMessage `json:"defaults"`
+		}
+		if err := json.Unmarshal(data, &rawExport); err != nil {
+			return fmt.Errorf("failed to inspect imported defaults: %w", err)
+		}
+		var rawDefaults map[string]json.RawMessage
+		if err := json.Unmarshal(rawExport.Defaults, &rawDefaults); err != nil {
+			return fmt.Errorf("failed to inspect imported defaults: %w", err)
+		}
+		defaultTimeoutPresent := false
+		for key := range rawDefaults {
+			if strings.EqualFold(key, "default_timeout_minutes") {
+				defaultTimeoutPresent = true
+				break
+			}
+		}
+		if !defaultTimeoutPresent {
+			export.Defaults.DefaultTimeoutMinutes = defaultJobTimeoutMinutes
+		}
+		if err := validateDefaultTimeoutMinutes(export.Defaults.DefaultTimeoutMinutes); err != nil {
+			return fmt.Errorf("invalid imported defaults: %w", err)
+		}
+	}
+
 	for index, job := range export.Jobs {
+		if err := validateTimeoutMinutes(job.TimeoutMinutes); err != nil {
+			return fmt.Errorf("invalid timeout for imported job %q: %w", job.Name, err)
+		}
+
 		// Ensure defaults if missing in JSON (though usually JSON unmarshals to zero values)
 		if job.ID == "" {
 			job.ID = uuid.New().String()
@@ -398,10 +437,8 @@ func (s *JobService) ImportJobs(filepath string) error {
 
 	// Import defaults if present in the export file
 	if export.Defaults != nil {
-		_, err := s.defaultsService.UpdateDefaults(export.Defaults)
-		if err != nil {
-			log.Printf("Warning: Failed to import defaults: %v", err)
-			// Continue even if defaults import fails
+		if _, err := s.defaultsService.UpdateDefaults(export.Defaults); err != nil {
+			return fmt.Errorf("failed to import defaults: %w", err)
 		}
 	}
 

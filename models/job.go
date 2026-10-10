@@ -23,6 +23,7 @@ type Job struct {
 	Paused                      bool   `json:"paused"`
 	RunAt                       *int64 `json:"run_at,omitempty"`                         // Unix timestamp for one-time execution
 	DelayMinutes                *int   `json:"delay_minutes,omitempty"`                  // Delay in minutes for delay-based scheduling
+	TimeoutMinutes              *int   `json:"timeout_minutes"`                          // Per-job timeout in minutes; nil uses the default
 	LastRunAt                   *int64 `json:"last_run_at,omitempty"`                    // Unix timestamp of most recent execution
 	NextRunAt                   *int64 `json:"next_run_at,omitempty"`                    // Persisted next scheduled execution time
 	LastScheduledAt             *int64 `json:"last_scheduled_at,omitempty"`              // Scheduled fire time of the most recent claimed run
@@ -43,10 +44,11 @@ type History struct {
 
 // Defaults represents default values for job fields
 type Defaults struct {
-	WorkingDirectory string `json:"working_directory"`
-	SoundFile        string `json:"sound_file"`
-	OnSuccessCmd     string `json:"on_success_cmd"`
-	APIPort          int    `json:"api_port"`
+	WorkingDirectory      string `json:"working_directory"`
+	SoundFile             string `json:"sound_file"`
+	OnSuccessCmd          string `json:"on_success_cmd"`
+	APIPort               int    `json:"api_port"`
+	DefaultTimeoutMinutes int    `json:"default_timeout_minutes"`
 }
 
 // JobExport represents the structure of an exported job file

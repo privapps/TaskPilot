@@ -143,6 +143,12 @@ The proxy provides access to all 9 TaskPilot MCP tools:
 
 All tools automatically enforce the `ai_` prefix for job names created through MCP.
 
+The `jobs_create` and `jobs_update` tools accept the optional `timeout_minutes`
+field as a whole-minute integer from 1 to 1440. On update, omitting the field
+preserves the current timeout; setting it to `null` clears the job override and
+uses the configured default. `jobs_get` and `jobs_list` return the field with
+each job.
+
 ### Protocol Methods (Not Listed as Tools)
 
 These are called directly as MCP protocol methods, not through `tools/call`:

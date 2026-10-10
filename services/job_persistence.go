@@ -10,11 +10,11 @@ import (
 
 const jobSelectColumns = `j.id, j.name, j.command, j.directory, j.schedule, j.sound_file, j.on_success_cmd, j.last_result, j.status,
 	COALESCE(j.schedule_type, 'cron'), COALESCE(j.paused, 0), j.run_at, j.delay_minutes, j.last_run_at, j.next_run_at, j.last_scheduled_at,
-	COALESCE(j.disable_macos_sleep_prevention, 0)`
+	COALESCE(j.disable_macos_sleep_prevention, 0), j.timeout_minutes`
 
 const jobSelectColumnsByID = `id, name, command, directory, schedule, sound_file, on_success_cmd, last_result, status,
 	COALESCE(schedule_type, 'cron'), COALESCE(paused, 0), run_at, delay_minutes, last_run_at, next_run_at, last_scheduled_at,
-	COALESCE(disable_macos_sleep_prevention, 0)`
+	COALESCE(disable_macos_sleep_prevention, 0), timeout_minutes`
 
 const historySelectColumns = `id, job_id, output, exit_code,
 	CAST(timestamp AS INTEGER) as timestamp,
@@ -74,8 +74,8 @@ func (p *JobPersistence) GetJob(id string) (models.Job, error) {
 }
 
 func (p *JobPersistence) InsertJob(job models.Job) error {
-	_, err := p.db.Exec(`INSERT INTO jobs (id, name, command, directory, schedule, sound_file, on_success_cmd, last_result, status, schedule_type, paused, run_at, delay_minutes, last_run_at, next_run_at, last_scheduled_at, disable_macos_sleep_prevention)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobArgs(job)...)
+	_, err := p.db.Exec(`INSERT INTO jobs (id, name, command, directory, schedule, sound_file, on_success_cmd, last_result, status, schedule_type, paused, run_at, delay_minutes, last_run_at, next_run_at, last_scheduled_at, disable_macos_sleep_prevention, timeout_minutes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobArgs(job)...)
 	if err != nil {
 		return fmt.Errorf("failed to create job: %w", err)
 	}
@@ -84,9 +84,9 @@ func (p *JobPersistence) InsertJob(job models.Job) error {
 
 func (p *JobPersistence) UpdateJob(job models.Job) error {
 	result, err := p.db.Exec(`UPDATE jobs SET name = ?, command = ?, directory = ?, schedule = ?, sound_file = ?, on_success_cmd = ?, last_result = ?, status = ?,
-		schedule_type = ?, paused = ?, run_at = ?, delay_minutes = ?, last_run_at = ?, next_run_at = ?, last_scheduled_at = ?, disable_macos_sleep_prevention = ? WHERE id = ?`,
+		schedule_type = ?, paused = ?, run_at = ?, delay_minutes = ?, last_run_at = ?, next_run_at = ?, last_scheduled_at = ?, disable_macos_sleep_prevention = ?, timeout_minutes = ? WHERE id = ?`,
 		job.Name, job.Command, job.Directory, job.Schedule, job.SoundFile, job.OnSuccessCmd, job.LastResult, job.Status,
-		job.ScheduleType, job.Paused, job.RunAt, job.DelayMinutes, job.LastRunAt, job.NextRunAt, job.LastScheduledAt, job.DisableMacosSleepPrevention, job.ID)
+		job.ScheduleType, job.Paused, job.RunAt, job.DelayMinutes, job.LastRunAt, job.NextRunAt, job.LastScheduledAt, job.DisableMacosSleepPrevention, job.TimeoutMinutes, job.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update job: %w", err)
 	}
@@ -136,8 +136,8 @@ func (p *JobPersistence) ImportJobs(jobs []models.Job) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.Prepare(`INSERT INTO jobs (id, name, command, directory, schedule, sound_file, on_success_cmd, last_result, status, schedule_type, paused, run_at, delay_minutes, last_run_at, next_run_at, last_scheduled_at, disable_macos_sleep_prevention)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	stmt, err := tx.Prepare(`INSERT INTO jobs (id, name, command, directory, schedule, sound_file, on_success_cmd, last_result, status, schedule_type, paused, run_at, delay_minutes, last_run_at, next_run_at, last_scheduled_at, disable_macos_sleep_prevention, timeout_minutes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		name=excluded.name,
 		command=excluded.command,
@@ -154,7 +154,8 @@ func (p *JobPersistence) ImportJobs(jobs []models.Job) error {
 		last_run_at=excluded.last_run_at,
 		next_run_at=excluded.next_run_at,
 		last_scheduled_at=excluded.last_scheduled_at,
-		disable_macos_sleep_prevention=excluded.disable_macos_sleep_prevention`)
+		disable_macos_sleep_prevention=excluded.disable_macos_sleep_prevention,
+		timeout_minutes=excluded.timeout_minutes`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
@@ -279,11 +280,13 @@ func (p *JobPersistence) SkipScheduledExecution(job models.Job, scheduledAt int6
 func scanJob(scanner rowScanner) (models.Job, error) {
 	var job models.Job
 	var runAt, delayMinutes, lastRunAt, nextRunAt, lastScheduledAt sql.NullInt64
+	var timeoutMinutes sql.NullInt64
 	err := scanner.Scan(
 		&job.ID, &job.Name, &job.Command, &job.Directory, &job.Schedule,
 		&job.SoundFile, &job.OnSuccessCmd, &job.LastResult, &job.Status,
 		&job.ScheduleType, &job.Paused, &runAt, &delayMinutes, &lastRunAt,
 		&nextRunAt, &lastScheduledAt, &job.DisableMacosSleepPrevention,
+		&timeoutMinutes,
 	)
 	if err != nil {
 		return models.Job{}, err
@@ -296,6 +299,10 @@ func scanJob(scanner rowScanner) (models.Job, error) {
 	job.LastRunAt = nullableInt64(lastRunAt)
 	job.NextRunAt = nullableInt64(nextRunAt)
 	job.LastScheduledAt = nullableInt64(lastScheduledAt)
+	if timeoutMinutes.Valid {
+		value := int(timeoutMinutes.Int64)
+		job.TimeoutMinutes = &value
+	}
 	return job, nil
 }
 
@@ -338,6 +345,6 @@ func jobArgs(job models.Job) []interface{} {
 		job.SoundFile, job.OnSuccessCmd, job.LastResult, job.Status,
 		job.ScheduleType, job.Paused, job.RunAt, job.DelayMinutes,
 		job.LastRunAt, job.NextRunAt, job.LastScheduledAt,
-		job.DisableMacosSleepPrevention,
+		job.DisableMacosSleepPrevention, job.TimeoutMinutes,
 	}
 }

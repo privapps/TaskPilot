@@ -109,10 +109,11 @@ func WithDelayMinutes(minutes int) TestJobOption {
 // NewTestDefaults creates a Defaults struct for testing
 func NewTestDefaults() Defaults {
 	return Defaults{
-		WorkingDirectory: "/home/user",
-		SoundFile:        "",
-		OnSuccessCmd:     "",
-		APIPort:          8080,
+		WorkingDirectory:      "/home/user",
+		SoundFile:             "",
+		OnSuccessCmd:          "",
+		APIPort:               8080,
+		DefaultTimeoutMinutes: 10,
 	}
 }
 

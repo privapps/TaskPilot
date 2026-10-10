@@ -3,6 +3,8 @@ package services
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"taskpilot/db"
@@ -31,8 +33,8 @@ func TestDefaultsService_GetDefaults(t *testing.T) {
 			defer sqlDB.Close()
 
 			// Mock GetDefaults query
-			rows := sqlmock.NewRows([]string{"working_directory", "sound_file", "on_success_cmd", "api_port"}).
-				AddRow("/tmp", "sound.mp3", "echo done", 8080)
+			rows := sqlmock.NewRows([]string{"working_directory", "sound_file", "on_success_cmd", "api_port", "default_timeout_minutes"}).
+				AddRow("/tmp", "sound.mp3", "echo done", 8080, 19)
 			mock.ExpectQuery("SELECT .* FROM defaults").WillReturnRows(rows)
 
 			wrapper := &db.Database{DB: sqlDB}
@@ -45,6 +47,9 @@ func TestDefaultsService_GetDefaults(t *testing.T) {
 
 			if !tt.wantErr && defaults.WorkingDirectory != "/tmp" {
 				t.Errorf("GetDefaults() returned wrong working directory: %s", defaults.WorkingDirectory)
+			}
+			if !tt.wantErr && defaults.DefaultTimeoutMinutes != 19 {
+				t.Errorf("GetDefaults() default timeout = %d, want 19", defaults.DefaultTimeoutMinutes)
 			}
 
 			if err := mock.ExpectationsWereMet(); err != nil {
@@ -72,9 +77,11 @@ func TestDefaultsService_GetDefaults_NoDefaults(t *testing.T) {
 	if err != nil {
 		t.Errorf("GetDefaults() expected nil error, got %v", err)
 	}
-	
+
 	if defaults == nil {
 		t.Error("GetDefaults() should return non-nil defaults even when none exist")
+	} else if defaults.DefaultTimeoutMinutes != 10 {
+		t.Errorf("GetDefaults() default timeout = %d, want 10 when no defaults row exists", defaults.DefaultTimeoutMinutes)
 	}
 }
 
@@ -107,10 +114,11 @@ func TestDefaultsService_SetDefaults_Update(t *testing.T) {
 
 	service := NewDefaultsServiceWithDB(mockDB)
 	defaults := models.Defaults{
-		WorkingDirectory: "/updated/path",
-		SoundFile:        "updated.mp3",
-		OnSuccessCmd:     "echo updated",
-		APIPort:          9090,
+		WorkingDirectory:      "/updated/path",
+		SoundFile:             "updated.mp3",
+		OnSuccessCmd:          "echo updated",
+		APIPort:               9090,
+		DefaultTimeoutMinutes: 23,
 	}
 
 	_, err := service.UpdateDefaults(&defaults)
@@ -127,8 +135,14 @@ func TestDefaultsService_SetDefaults_Update(t *testing.T) {
 	// Verify correct values were passed
 	if len(mockDB.ExecCalls) > 0 {
 		call := mockDB.ExecCalls[0]
-		if len(call.Args) < 4 {
-			t.Error("Expected at least 4 arguments to Exec")
+		if len(call.Args) != 5 {
+			t.Fatalf("Expected 5 arguments to Exec, got %d", len(call.Args))
+		}
+		if got := call.Args[4]; got != defaults.DefaultTimeoutMinutes {
+			t.Errorf("UpdateDefaults() default timeout argument = %v, want %d", got, defaults.DefaultTimeoutMinutes)
+		}
+		if !strings.Contains(call.Query, "default_timeout_minutes") {
+			t.Errorf("UpdateDefaults() query %q does not persist default_timeout_minutes", call.Query)
 		}
 	}
 }
@@ -187,15 +201,16 @@ func TestDefaultsService_ApplyDefaultsToJob(t *testing.T) {
 	defer sqlDB.Close()
 
 	defaults := models.Defaults{
-		WorkingDirectory: "/default/path",
-		SoundFile:        "default.mp3",
-		OnSuccessCmd:     "echo default",
-		APIPort:          8080,
+		WorkingDirectory:      "/default/path",
+		SoundFile:             "default.mp3",
+		OnSuccessCmd:          "echo default",
+		APIPort:               8080,
+		DefaultTimeoutMinutes: 10,
 	}
 
 	// Mock GetDefaults query
-	rows := sqlmock.NewRows([]string{"working_directory", "sound_file", "on_success_cmd", "api_port"}).
-		AddRow(defaults.WorkingDirectory, defaults.SoundFile, defaults.OnSuccessCmd, defaults.APIPort)
+	rows := sqlmock.NewRows([]string{"working_directory", "sound_file", "on_success_cmd", "api_port", "default_timeout_minutes"}).
+		AddRow(defaults.WorkingDirectory, defaults.SoundFile, defaults.OnSuccessCmd, defaults.APIPort, defaults.DefaultTimeoutMinutes)
 	mock.ExpectQuery("SELECT .* FROM defaults").WillReturnRows(rows)
 
 	wrapper := &db.Database{DB: sqlDB}
@@ -211,5 +226,45 @@ func TestDefaultsService_ApplyDefaultsToJob(t *testing.T) {
 
 	if job.Directory != defaults.WorkingDirectory {
 		t.Errorf("ApplyDefaultsToJob() did not apply default directory, got %s", job.Directory)
+	}
+}
+
+func TestDefaultsService_ValidatesDefaultTimeoutMinutes(t *testing.T) {
+	for _, timeoutMinutes := range []int{0, -1, 1441} {
+		t.Run(fmt.Sprintf("reject_%d", timeoutMinutes), func(t *testing.T) {
+			mockDB := db.NewMockDB()
+			service := NewDefaultsServiceWithDB(mockDB)
+			defaults := models.NewTestDefaults()
+			defaults.DefaultTimeoutMinutes = timeoutMinutes
+
+			if _, err := service.UpdateDefaults(&defaults); err == nil ||
+				!strings.Contains(err.Error(), "default_timeout_minutes must be between 1 and 1440 minutes") {
+				t.Fatalf("UpdateDefaults() error = %v, want default timeout range validation", err)
+			}
+			if len(mockDB.ExecCalls) != 0 {
+				t.Errorf("UpdateDefaults() executed %d database writes for invalid timeout", len(mockDB.ExecCalls))
+			}
+		})
+	}
+}
+
+func TestDefaultsServiceAcceptsDefaultTimeoutBounds(t *testing.T) {
+	for _, timeoutMinutes := range []int{1, 1440} {
+		t.Run(fmt.Sprintf("accept_%d", timeoutMinutes), func(t *testing.T) {
+			mockDB := db.NewMockDB()
+			mockDB.ExecFunc = func(query string, args ...interface{}) (sql.Result, error) {
+				return &db.MockResult{}, nil
+			}
+			service := NewDefaultsServiceWithDB(mockDB)
+			defaults := models.NewTestDefaults()
+			defaults.DefaultTimeoutMinutes = timeoutMinutes
+
+			if _, err := service.UpdateDefaults(&defaults); err != nil {
+				t.Fatalf("UpdateDefaults() rejected valid timeout %d: %v", timeoutMinutes, err)
+			}
+			if len(mockDB.ExecCalls) != 1 {
+				t.Errorf("UpdateDefaults() executed %d writes, want 1", len(mockDB.ExecCalls))
+			}
+		})
 	}
 }

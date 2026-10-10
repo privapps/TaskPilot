@@ -5,6 +5,7 @@ export namespace models {
 	    sound_file: string;
 	    on_success_cmd: string;
 	    api_port: number;
+	    default_timeout_minutes: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Defaults(source);
@@ -16,6 +17,7 @@ export namespace models {
 	        this.sound_file = source["sound_file"];
 	        this.on_success_cmd = source["on_success_cmd"];
 	        this.api_port = source["api_port"];
+	        this.default_timeout_minutes = source["default_timeout_minutes"];
 	    }
 	}
 	export class History {
@@ -58,6 +60,7 @@ export namespace models {
 	    paused: boolean;
 	    run_at?: number;
 	    delay_minutes?: number;
+	    timeout_minutes?: number;
 	    last_run_at?: number;
 	    next_run_at?: number;
 	    last_scheduled_at?: number;
@@ -82,6 +85,7 @@ export namespace models {
 	        this.paused = source["paused"];
 	        this.run_at = source["run_at"];
 	        this.delay_minutes = source["delay_minutes"];
+	        this.timeout_minutes = source["timeout_minutes"];
 	        this.last_run_at = source["last_run_at"];
 	        this.next_run_at = source["next_run_at"];
 	        this.last_scheduled_at = source["last_scheduled_at"];

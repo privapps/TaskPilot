@@ -12,11 +12,17 @@ import (
 	"taskpilot/models"
 )
 
+const (
+	timeoutKillGracePeriod = 250 * time.Millisecond
+	timeoutWaitDelay       = 2 * time.Second
+)
+
 type ExecutionResult struct {
 	Output    string
 	ExitCode  int
 	StartedAt time.Time
 	Duration  time.Duration
+	TimedOut  bool
 }
 
 // JobExecutor is the internal seam for running a job command.
@@ -30,6 +36,7 @@ type ShellJobExecutor struct{}
 func (ShellJobExecutor) Execute(ctx context.Context, job models.Job) ExecutionResult {
 	startedAt := time.Now()
 	command := exec.CommandContext(ctx, "sh", "-c", wrapWithCaffeinate(job.Command, job.DisableMacosSleepPrevention))
+	configureJobProcess(command, timeoutKillGracePeriod, timeoutWaitDelay)
 	if job.Directory != "" {
 		command.Dir = job.Directory
 	}
@@ -59,6 +66,7 @@ func (ShellJobExecutor) Execute(ctx context.Context, job models.Job) ExecutionRe
 		ExitCode:  exitCode,
 		StartedAt: startedAt,
 		Duration:  time.Since(startedAt),
+		TimedOut:  ctx.Err() == context.DeadlineExceeded,
 	}
 }
 

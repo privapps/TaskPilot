@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"log"
 	"testing"
 	"time"
 
@@ -104,6 +105,11 @@ func TestSchedulerManualExecutionUsesExecutorSeam(t *testing.T) {
 	)
 	jobService.SetScheduler(scheduler)
 
+	var logs synchronizedTestBuffer
+	previousLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previousLogOutput)
+
 	scheduler.RunJobImmediately(job)
 	select {
 	case calledJob := <-executor.called:
@@ -114,20 +120,19 @@ func TestSchedulerManualExecutionUsesExecutorSeam(t *testing.T) {
 		t.Fatal("scheduler did not invoke executor")
 	}
 
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		stored, err := jobService.GetJobByID(job.ID)
-		if err == nil && stored.LastResult == "success" {
-			history, err := jobService.GetJobHistory(job.ID, 10)
-			if err != nil {
-				t.Fatalf("GetJobHistory() failed: %v", err)
-			}
-			if len(history) != 1 || history[0].Output != "fake output" {
-				t.Fatalf("history = %+v, want fake execution output", history)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitForLogMessage(t, &logs, "Job Test Job completed with exit code 0")
+	stored, err := jobService.GetJobByID(job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID() failed: %v", err)
 	}
-	t.Fatal("scheduler did not persist the fake execution result")
+	if stored.LastResult != "success" {
+		t.Fatalf("last_result = %q, want success", stored.LastResult)
+	}
+	history, err := jobService.GetJobHistory(job.ID, 10)
+	if err != nil {
+		t.Fatalf("GetJobHistory() failed: %v", err)
+	}
+	if len(history) != 1 || history[0].Output != "fake output" {
+		t.Fatalf("history = %+v, want fake execution output", history)
+	}
 }

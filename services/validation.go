@@ -1,6 +1,32 @@
 package services
 
-import "taskpilot/models"
+import (
+	"fmt"
+
+	"taskpilot/models"
+)
+
+const (
+	minJobTimeoutMinutes = 1
+	maxJobTimeoutMinutes = 1440
+)
+
+func validateTimeoutMinutes(timeoutMinutes *int) error {
+	if timeoutMinutes == nil {
+		return nil
+	}
+	if *timeoutMinutes < minJobTimeoutMinutes || *timeoutMinutes > maxJobTimeoutMinutes {
+		return fmt.Errorf("timeout_minutes must be between %d and %d minutes", minJobTimeoutMinutes, maxJobTimeoutMinutes)
+	}
+	return nil
+}
+
+func validateDefaultTimeoutMinutes(timeoutMinutes int) error {
+	if timeoutMinutes < minJobTimeoutMinutes || timeoutMinutes > maxJobTimeoutMinutes {
+		return fmt.Errorf("default_timeout_minutes must be between %d and %d minutes", minJobTimeoutMinutes, maxJobTimeoutMinutes)
+	}
+	return nil
+}
 
 // validateCronExpression validates a cron expression using the same parser as the scheduler
 func validateCronExpression(expr string) error {

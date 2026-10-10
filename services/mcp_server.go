@@ -111,6 +111,10 @@ func wrapMCPResult(data interface{}) (MCPToolResult, error) {
 	}, nil
 }
 
+func isTimeoutValidationError(err error) bool {
+	return err != nil && strings.HasPrefix(err.Error(), "timeout_minutes must be between ")
+}
+
 // RegisterClient adds a new client connection
 func (s *MCPServer) RegisterClient(clientID string) chan MCPEvent {
 	s.mu.Lock()
@@ -236,6 +240,12 @@ func (s *MCPServer) handleToolsList(ctx context.Context, req MCPRequest) MCPResp
 						"type":        "integer",
 						"description": "Minutes to delay execution. Only used when schedule_type is 'delay'.",
 					},
+					"timeout_minutes": map[string]interface{}{
+						"type":        []string{"integer", "null"},
+						"minimum":     1,
+						"maximum":     1440,
+						"description": "Optional job timeout in whole minutes (1–1440); null or omitted uses the default.",
+					},
 				},
 				"required": []string{"command"},
 			},
@@ -292,6 +302,12 @@ func (s *MCPServer) handleToolsList(ctx context.Context, req MCPRequest) MCPResp
 					"paused": map[string]interface{}{
 						"type":        "boolean",
 						"description": "Pause/unpause the job",
+					},
+					"timeout_minutes": map[string]interface{}{
+						"type":        []string{"integer", "null"},
+						"minimum":     1,
+						"maximum":     1440,
+						"description": "Timeout in whole minutes (1–1440); omit to leave unchanged or set null to use the default.",
 					},
 				},
 				"required": []string{"id"},
@@ -603,15 +619,16 @@ func (s *MCPServer) HandleRequest(ctx context.Context, req MCPRequest) MCPRespon
 // Placeholder handler methods - Job operations
 func (s *MCPServer) handleJobCreate(ctx context.Context, req MCPRequest) MCPResponse {
 	var params struct {
-		Name         string `json:"name"`
-		Command      string `json:"command"`
-		Directory    string `json:"directory,omitempty"`
-		Schedule     string `json:"schedule,omitempty"`
-		ScheduleType string `json:"schedule_type,omitempty"`
-		SoundFile    string `json:"sound_file,omitempty"`
-		OnSuccessCmd string `json:"on_success_cmd,omitempty"`
-		DelayMinutes *int   `json:"delay_minutes,omitempty"`
-		RunAt        *int64 `json:"run_at,omitempty"`
+		Name           string `json:"name"`
+		Command        string `json:"command"`
+		Directory      string `json:"directory,omitempty"`
+		Schedule       string `json:"schedule,omitempty"`
+		ScheduleType   string `json:"schedule_type,omitempty"`
+		SoundFile      string `json:"sound_file,omitempty"`
+		OnSuccessCmd   string `json:"on_success_cmd,omitempty"`
+		DelayMinutes   *int   `json:"delay_minutes,omitempty"`
+		RunAt          *int64 `json:"run_at,omitempty"`
+		TimeoutMinutes *int   `json:"timeout_minutes,omitempty"`
 	}
 
 	if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -646,25 +663,30 @@ func (s *MCPServer) handleJobCreate(ctx context.Context, req MCPRequest) MCPResp
 
 	// Create job
 	job := models.Job{
-		Name:         params.Name,
-		Command:      params.Command,
-		Directory:    params.Directory,
-		Schedule:     params.Schedule,
-		ScheduleType: params.ScheduleType,
-		SoundFile:    params.SoundFile,
-		OnSuccessCmd: params.OnSuccessCmd,
-		DelayMinutes: params.DelayMinutes,
-		RunAt:        params.RunAt,
+		Name:           params.Name,
+		Command:        params.Command,
+		Directory:      params.Directory,
+		Schedule:       params.Schedule,
+		ScheduleType:   params.ScheduleType,
+		SoundFile:      params.SoundFile,
+		OnSuccessCmd:   params.OnSuccessCmd,
+		DelayMinutes:   params.DelayMinutes,
+		RunAt:          params.RunAt,
+		TimeoutMinutes: params.TimeoutMinutes,
 	}
 
 	createdJob, err := s.jobService.CreateJob(job)
 	if err != nil {
+		message := "Failed to create job: " + err.Error()
+		if isTimeoutValidationError(err) {
+			message = err.Error()
+		}
 		return MCPResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Error: &MCPError{
 				Code:    MCPErrorInvalidParams,
-				Message: "Failed to create job: " + err.Error(),
+				Message: message,
 			},
 		}
 	}
@@ -818,17 +840,18 @@ func (s *MCPServer) handleJobList(ctx context.Context, req MCPRequest) MCPRespon
 
 func (s *MCPServer) handleJobUpdate(ctx context.Context, req MCPRequest) MCPResponse {
 	var params struct {
-		ID           string  `json:"id"`
-		Name         *string `json:"name,omitempty"`
-		Command      *string `json:"command,omitempty"`
-		Directory    *string `json:"directory,omitempty"`
-		Schedule     *string `json:"schedule,omitempty"`
-		ScheduleType *string `json:"schedule_type,omitempty"`
-		SoundFile    *string `json:"sound_file,omitempty"`
-		OnSuccessCmd *string `json:"on_success_cmd,omitempty"`
-		DelayMinutes *int    `json:"delay_minutes,omitempty"`
-		RunAt        *int64  `json:"run_at,omitempty"`
-		Paused       *bool   `json:"paused,omitempty"`
+		ID             string          `json:"id"`
+		Name           *string         `json:"name,omitempty"`
+		Command        *string         `json:"command,omitempty"`
+		Directory      *string         `json:"directory,omitempty"`
+		Schedule       *string         `json:"schedule,omitempty"`
+		ScheduleType   *string         `json:"schedule_type,omitempty"`
+		SoundFile      *string         `json:"sound_file,omitempty"`
+		OnSuccessCmd   *string         `json:"on_success_cmd,omitempty"`
+		DelayMinutes   *int            `json:"delay_minutes,omitempty"`
+		RunAt          *int64          `json:"run_at,omitempty"`
+		TimeoutMinutes json.RawMessage `json:"timeout_minutes,omitempty"`
+		Paused         *bool           `json:"paused,omitempty"`
 	}
 
 	if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -893,18 +916,42 @@ func (s *MCPServer) handleJobUpdate(ctx context.Context, req MCPRequest) MCPResp
 	if params.RunAt != nil {
 		existingJob.RunAt = params.RunAt
 	}
+	if len(params.TimeoutMinutes) > 0 {
+		var timeoutMinutes *int
+		if strings.TrimSpace(string(params.TimeoutMinutes)) != "null" {
+			var value int
+			if err := json.Unmarshal(params.TimeoutMinutes, &value); err != nil {
+				return MCPResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error: &MCPError{
+						Code:    MCPErrorInvalidParams,
+						Message: "Invalid timeout_minutes: " + err.Error(),
+					},
+				}
+			}
+			timeoutMinutes = &value
+		}
+		existingJob.TimeoutMinutes = timeoutMinutes
+	}
 	if params.Paused != nil {
 		existingJob.Paused = *params.Paused
 	}
 
 	updatedJob, err := s.jobService.UpdateJob(existingJob)
 	if err != nil {
+		errorCode := MCPErrorInternalError
+		message := "Failed to update job: " + err.Error()
+		if isTimeoutValidationError(err) {
+			errorCode = MCPErrorInvalidParams
+			message = err.Error()
+		}
 		return MCPResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Error: &MCPError{
-				Code:    MCPErrorInternalError,
-				Message: "Failed to update job: " + err.Error(),
+				Code:    errorCode,
+				Message: message,
 			},
 		}
 	}
